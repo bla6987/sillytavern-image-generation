@@ -2,12 +2,10 @@ import { getContext, extension_settings } from '../../../extensions.js';
 import { generateQuietPrompt } from '../../../../script.js';
 import { eventSource, event_types } from '../../../../script.js';
 import { saveSettingsDebounced } from '../../../../script.js';
-import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
-import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
-import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from '../../../slash-commands/SlashCommandArgument.js';
 
 const extensionName = 'image_generation';
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
+let slashCommandsRegistered = false;
 
 // Match ST default visible generation modes.
 const generationMode = {
@@ -411,36 +409,103 @@ function getModeEnumList() {
     return orderedModes.flatMap(mode => triggerWords[mode]);
 }
 
+function normalizeSlashArg(unnamedArgs) {
+    if (Array.isArray(unnamedArgs)) {
+        return unnamedArgs.map(x => String(x ?? '')).join(' ').trim();
+    }
+    if (unnamedArgs === undefined || unnamedArgs === null) {
+        return '';
+    }
+    return String(unnamedArgs).trim();
+}
+
+function getSlashModeInput(namedArgs, unnamedArgs) {
+    const namedMode = namedArgs?.mode;
+    if (namedMode !== undefined && namedMode !== null && String(namedMode).trim().length > 0) {
+        return String(namedMode);
+    }
+
+    const argText = normalizeSlashArg(unnamedArgs);
+    if (!argText) {
+        return '';
+    }
+
+    // Compatibility for legacy command registration where mode may be passed in unnamed text.
+    const modeMatch = argText.match(/(?:^|\s)mode\s*=\s*([^\s]+)/i);
+    if (modeMatch?.[1]) {
+        return modeMatch[1];
+    }
+
+    return argText;
+}
+
 function registerSlashCommands() {
+    if (slashCommandsRegistered) {
+        return;
+    }
+
     try {
-        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
-            name: 'imgclone',
-            callback: async (namedArgs, unnamedArg) => {
-                // Accept /imgclone, /imgclone mode=you, and /imgclone you.
-                const modeInput = namedArgs?.mode ?? unnamedArg;
-                const mode = modeInput !== undefined && String(modeInput).trim().length > 0
-                    ? parseMode(String(modeInput))
-                    : normalizeMode(getSettings().mode);
-                await generateImage(mode);
-                return 'Image generation started';
-            },
-            aliases: ['igc'],
-            namedArgumentList: [
-                SlashCommandNamedArgument.fromProps({
-                    name: 'mode',
-                    description: 'Generation mode: you, face, me, scene, last, raw_last, background',
-                    typeList: [ARGUMENT_TYPE.STRING],
-                }),
-            ],
-            unnamedArgumentList: [
-                SlashCommandArgument.fromProps({
-                    description: 'Generation mode trigger (you, face, me, scene, last, raw_last, background)',
-                    typeList: [ARGUMENT_TYPE.STRING],
-                    isRequired: false,
-                }),
-            ],
-            helpString: 'Generate an image using default SillyTavern image-generation modes. Supported mode values: you, face, me, scene, last, raw_last, background.',
-        }));
+        const context = getContext();
+        const {
+            SlashCommandParser,
+            SlashCommand,
+            SlashCommandArgument,
+            SlashCommandNamedArgument,
+            ARGUMENT_TYPE,
+            registerSlashCommand,
+        } = context;
+
+        const commandHelp = 'Generate an image using default SillyTavern image-generation modes. Supported mode values: you, face, me, scene, last, raw_last, background.';
+        const commandCallback = async (namedArgs, unnamedArg) => {
+            const modeInput = getSlashModeInput(namedArgs, unnamedArg);
+            const mode = modeInput
+                ? parseMode(modeInput)
+                : normalizeMode(getSettings().mode);
+            await generateImage(mode);
+            return '';
+        };
+
+        if (SlashCommandParser && SlashCommand) {
+            const commandProps = {
+                name: 'imgclone',
+                callback: commandCallback,
+                aliases: ['igc'],
+                helpString: commandHelp,
+            };
+
+            if (SlashCommandNamedArgument && ARGUMENT_TYPE) {
+                commandProps.namedArgumentList = [
+                    SlashCommandNamedArgument.fromProps({
+                        name: 'mode',
+                        description: `Generation mode: ${getModeEnumList().join(', ')}`,
+                        typeList: [ARGUMENT_TYPE.STRING],
+                    }),
+                ];
+            }
+
+            if (SlashCommandArgument && ARGUMENT_TYPE) {
+                commandProps.unnamedArgumentList = [
+                    SlashCommandArgument.fromProps({
+                        description: `Generation mode trigger (${getModeEnumList().join(', ')})`,
+                        typeList: [ARGUMENT_TYPE.STRING],
+                        isRequired: false,
+                    }),
+                ];
+            }
+
+            SlashCommandParser.addCommandObject(SlashCommand.fromProps(commandProps));
+            slashCommandsRegistered = true;
+            return;
+        }
+
+        // Legacy fallback for older ST versions exposing registerSlashCommand in context.
+        if (typeof registerSlashCommand === 'function') {
+            registerSlashCommand('imgclone', commandCallback, ['igc'], commandHelp);
+            slashCommandsRegistered = true;
+            return;
+        }
+
+        console.warn('[IGC] Slash command API unavailable; command registration skipped.');
     } catch (error) {
         console.error('[IGC] Error registering slash commands:', error);
     }
@@ -448,12 +513,16 @@ function registerSlashCommands() {
 
 jQuery(async function () {
     loadSettings();
+    registerSlashCommands();
 
-    const settingsHtml = await $.get(`${extensionFolderPath}/settings.html`);
-    $('#extensions_settings').append(settingsHtml);
-
-    updateUIFromSettings();
-    bindUIEvents();
+    try {
+        const settingsHtml = await $.get(`${extensionFolderPath}/settings.html`);
+        $('#extensions_settings').append(settingsHtml);
+        updateUIFromSettings();
+        bindUIEvents();
+    } catch (error) {
+        console.error('[IGC] Failed to load settings UI:', error);
+    }
 
     function tryCreateButton(attempts = 0) {
         if (attempts >= 10) {
@@ -466,8 +535,6 @@ jQuery(async function () {
     }
     tryCreateButton();
 
-    registerSlashCommands();
-
     eventSource.on(event_types.CHAT_CHANGED, function () {
         setTimeout(createChatButton, 500);
     });
@@ -477,6 +544,7 @@ jQuery(async function () {
     });
 
     eventSource.on(event_types.APP_READY, function () {
+        registerSlashCommands();
         setTimeout(createChatButton, 500);
     });
 });
