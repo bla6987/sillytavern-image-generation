@@ -1,3 +1,4 @@
+import { Popper } from '../../../../lib.js';
 import { getContext, extension_settings } from '../../../extensions.js';
 import { generateQuietPrompt, generateRaw } from '../../../../script.js';
 import { eventSource, event_types } from '../../../../script.js';
@@ -5,7 +6,11 @@ import { saveSettingsDebounced } from '../../../../script.js';
 
 const extensionName = 'image_generation';
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
+const modeDropdownId = 'igc_dropdown';
+const modeDropdownButtonSelector = '#image_gen_clone_button';
 let slashCommandsRegistered = false;
+let modeDropdownPopper = null;
+let modeDropdownCloseHandlerBound = false;
 
 // Match ST default visible generation modes.
 const generationMode = {
@@ -566,13 +571,32 @@ async function executeSTImageGeneration(prompt) {
             handleExecutionErrors: false,
         });
 
-        if (!result || result.isError || result.isAborted || !result.pipe) {
+        if (!result || result.isError || result.isAborted) {
             const reason = result?.errorMessage || result?.abortReason || 'No image URL returned from /sd command.';
             throw new Error(reason);
         }
+
+        const imagePath = typeof result.pipe === 'string'
+            ? result.pipe.trim()
+            : String(result.pipe ?? '').trim();
+        if (!imagePath) {
+            throw new Error('No image URL returned from /sd command.');
+        }
+
+        return imagePath;
     } catch (error) {
         throw new Error(`Failed to execute /sd command: ${error.message}`);
     }
+}
+
+async function applyGeneratedBackground(imagePath) {
+    const normalizedPath = String(imagePath ?? '').trim();
+    if (!normalizedPath) {
+        throw new Error('No generated image path available for background.');
+    }
+
+    const cssUrl = `url("${encodeURI(normalizedPath)}")`;
+    await eventSource.emit(event_types.FORCE_SET_BACKGROUND, { url: cssUrl, path: normalizedPath });
 }
 
 async function generateImage(overrideMode = null) {
@@ -588,8 +612,26 @@ async function generateImage(overrideMode = null) {
         const generatedPrompt = await generatePromptWithLLM(mode);
         const finalPrompt = buildFinalPrompt(generatedPrompt);
         const reviewedPrompt = await maybeReviewPrompt(finalPrompt);
-        await executeSTImageGeneration(reviewedPrompt);
-        toastr.success('Image generated successfully!');
+        const imagePath = await executeSTImageGeneration(reviewedPrompt);
+
+        if (mode === generationMode.BACKGROUND) {
+            let backgroundApplied = true;
+            try {
+                await applyGeneratedBackground(imagePath);
+            } catch (error) {
+                backgroundApplied = false;
+                console.warn('[IGC] Failed to auto-apply generated background:', error);
+                toastr.warning('Image generated, but setting background failed.');
+            }
+
+            if (backgroundApplied) {
+                toastr.success('Image generated and set as background!');
+            } else {
+                toastr.success('Image generated successfully!');
+            }
+        } else {
+            toastr.success('Image generated successfully!');
+        }
     } catch (error) {
         const message = String(error?.message || 'Unknown error');
         if (/aborted by user|canceled|cancelled/i.test(message)) {
@@ -599,6 +641,125 @@ async function generateImage(overrideMode = null) {
         }
     } finally {
         $button.prop('disabled', false).html(originalHtml);
+    }
+}
+
+function destroyModeDropdownPopper() {
+    if (modeDropdownPopper && typeof modeDropdownPopper.destroy === 'function') {
+        modeDropdownPopper.destroy();
+    }
+    modeDropdownPopper = null;
+}
+
+function hideModeDropdown() {
+    const $dropdown = $(`#${modeDropdownId}`);
+    if (!$dropdown.length) {
+        return;
+    }
+
+    $dropdown.hide();
+    destroyModeDropdownPopper();
+}
+
+function ensureModeDropdown() {
+    let $dropdown = $(`#${modeDropdownId}`);
+    if ($dropdown.length) {
+        return $dropdown;
+    }
+
+    $dropdown = $('<div></div>')
+        .attr('id', modeDropdownId)
+        .addClass('igc-dropdown');
+
+    const $list = $('<ul class="list-group"></ul>');
+    const $title = $('<span class="igc-dropdown-title">Send me a picture of:</span>');
+    $list.append($title);
+
+    for (const mode of orderedModes) {
+        const displayName = modeDisplayNames[mode] || `Mode ${mode}`;
+        const $item = $('<li></li>')
+            .addClass('list-group-item igc-dropdown-item')
+            .attr('data-mode', mode)
+            .text(displayName);
+        $list.append($item);
+    }
+
+    $dropdown.append($list).hide();
+    $dropdown.on('click', '.igc-dropdown-item', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        hideModeDropdown();
+        const selectedMode = Number($(this).attr('data-mode'));
+        generateImage(selectedMode);
+    });
+
+    $(document.body).append($dropdown);
+    return $dropdown;
+}
+
+function bindModeDropdownCloseHandler() {
+    if (modeDropdownCloseHandlerBound) {
+        return;
+    }
+
+    modeDropdownCloseHandlerBound = true;
+    $(document).on('click touchend', function (e) {
+        const $dropdown = $(`#${modeDropdownId}`);
+        if (!$dropdown.length || !$dropdown.is(':visible')) {
+            return;
+        }
+
+        const $target = $(e.target);
+        if ($target.closest(`#${modeDropdownId}`).length || $target.closest(modeDropdownButtonSelector).length) {
+            return;
+        }
+
+        hideModeDropdown();
+    });
+
+    $(window).on('resize', function () {
+        const $dropdown = $(`#${modeDropdownId}`);
+        if (!$dropdown.length || !$dropdown.is(':visible')) {
+            return;
+        }
+
+        if (modeDropdownPopper && typeof modeDropdownPopper.update === 'function') {
+            modeDropdownPopper.update();
+        }
+    });
+}
+
+function showModeDropdown($button) {
+    if (!$button?.length) {
+        return;
+    }
+
+    const $dropdown = ensureModeDropdown();
+    bindModeDropdownCloseHandler();
+
+    if ($dropdown.is(':visible')) {
+        hideModeDropdown();
+        return;
+    }
+
+    destroyModeDropdownPopper();
+    if (Popper?.createPopper) {
+        modeDropdownPopper = Popper.createPopper($button.get(0), $dropdown.get(0), {
+            placement: 'top',
+        });
+    } else {
+        const offset = $button.offset();
+        if (offset) {
+            $dropdown.css({
+                left: `${offset.left}px`,
+                top: `${Math.max(8, offset.top - 12)}px`,
+            });
+        }
+    }
+
+    $dropdown.show();
+    if (modeDropdownPopper && typeof modeDropdownPopper.update === 'function') {
+        modeDropdownPopper.update();
     }
 }
 
@@ -623,15 +784,19 @@ function createChatButton() {
             $menuContainer.append($menuButton);
         }
 
+        ensureModeDropdown();
+        bindModeDropdownCloseHandler();
+
         $menuButton.on('click', function (e) {
             e.preventDefault();
             e.stopPropagation();
-            generateImage();
+            showModeDropdown($(this));
         });
 
         $menuButton.on('contextmenu', function (e) {
             e.preventDefault();
             e.stopPropagation();
+            hideModeDropdown();
             showModePopup(e.pageX, e.pageY);
         });
 
@@ -691,12 +856,14 @@ function createChatButton() {
     $button.on('click', function (e) {
         e.preventDefault();
         e.stopPropagation();
+        hideModeDropdown();
         generateImage();
     });
 
     $button.on('contextmenu', function (e) {
         e.preventDefault();
         e.stopPropagation();
+        hideModeDropdown();
         showModePopup(e.pageX, e.pageY);
     });
 
@@ -879,6 +1046,7 @@ jQuery(async function () {
     tryCreateButton();
 
     eventSource.on(event_types.CHAT_CHANGED, function () {
+        hideModeDropdown();
         setTimeout(createChatButton, 500);
     });
 
@@ -887,6 +1055,7 @@ jQuery(async function () {
     });
 
     eventSource.on(event_types.APP_READY, function () {
+        hideModeDropdown();
         registerSlashCommands();
         setTimeout(createChatButton, 500);
     });
