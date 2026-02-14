@@ -1,0 +1,38 @@
+<div class="igc-settings-container">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Image Generation Clone</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <!-- Generation Mode -->
+            <div class="igc-section-header">Generation Mode</div>
+            <div class="igc-settings-row">
+                <label for="igc_mode">Mode:</label>
+                <select id="igc_mode">
+                    <option value="0">Yourself</option>
+                    <option value="5">Your Face</option>
+                    <option value="1">Me</option>
+                    <option value="2">The Whole Story</option>
+                    <option value="4">The Last Message</option>
+                    <option value="3">Raw Last Message</option>
+                    <option value="7">Background</option>
+                </select>
+            </div>
+
+            <!-- Prompt Settings -->
+            <div class="igc-section-header">Prompt Settings</div>
+            <div class="igc-settings-row igc-textarea-row">
+                <label for="igc_prefix">Prompt Prefix:</label>
+                <textarea id="igc_prefix" placeholder="best quality, absurdres, aesthetic,"></textarea>
+            </div>
+
+            <!-- Generate Button -->
+            <div class="igc-settings-row">
+                <button id="igc_generate_button" class="menu_button igc-generate-button">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> Generate Image
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
