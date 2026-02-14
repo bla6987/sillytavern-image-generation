@@ -4,7 +4,7 @@ import { eventSource, event_types } from '../../../../script.js';
 import { saveSettingsDebounced } from '../../../../script.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
-import { ARGUMENT_TYPE, SlashCommandNamedArgument } from '../../../slash-commands/SlashCommandArgument.js';
+import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from '../../../slash-commands/SlashCommandArgument.js';
 
 const extensionName = 'image_generation';
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
@@ -266,6 +266,37 @@ function createChatButton() {
         return true;
     }
 
+    const $menuContainer = $('#sd_wand_container');
+    if ($menuContainer.length > 0) {
+        const $menuButton = $(`
+            <div id="image_gen_clone_button" class="list-group-item flex-container flexGap5" title="Send me a picture of...">
+                <div class="fa-solid fa-wand-magic-sparkles extensionsMenuExtensionButton"></div>
+                <span>Generate Image (Clone)</span>
+            </div>
+        `);
+
+        const $stopButton = $('#sd_stop_gen');
+        if ($stopButton.length > 0) {
+            $stopButton.before($menuButton);
+        } else {
+            $menuContainer.append($menuButton);
+        }
+
+        $menuButton.on('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            generateImage();
+        });
+
+        $menuButton.on('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            showModePopup(e.pageX, e.pageY);
+        });
+
+        return true;
+    }
+
     const containerSelectors = [
         '#leftSendForm',
         '#rightSendForm',
@@ -384,14 +415,12 @@ function registerSlashCommands() {
     try {
         SlashCommandParser.addCommandObject(SlashCommand.fromProps({
             name: 'imgclone',
-            callback: async (namedArgs, unnamedArgs) => {
-                const extraText = unnamedArgs?.toString().trim();
-                if (extraText) {
-                    throw new Error('Custom prompt arguments are not supported in strict parity mode.');
-                }
-
-                const modeInput = namedArgs.mode;
-                const mode = modeInput !== undefined ? parseMode(modeInput) : normalizeMode(getSettings().mode);
+            callback: async (namedArgs, unnamedArg) => {
+                // Accept /imgclone, /imgclone mode=you, and /imgclone you.
+                const modeInput = namedArgs?.mode ?? unnamedArg;
+                const mode = modeInput !== undefined && String(modeInput).trim().length > 0
+                    ? parseMode(String(modeInput))
+                    : normalizeMode(getSettings().mode);
                 await generateImage(mode);
                 return 'Image generation started';
             },
@@ -401,7 +430,13 @@ function registerSlashCommands() {
                     name: 'mode',
                     description: 'Generation mode: you, face, me, scene, last, raw_last, background',
                     typeList: [ARGUMENT_TYPE.STRING],
-                    enumList: getModeEnumList(),
+                }),
+            ],
+            unnamedArgumentList: [
+                SlashCommandArgument.fromProps({
+                    description: 'Generation mode trigger (you, face, me, scene, last, raw_last, background)',
+                    typeList: [ARGUMENT_TYPE.STRING],
+                    isRequired: false,
                 }),
             ],
             helpString: 'Generate an image using default SillyTavern image-generation modes. Supported mode values: you, face, me, scene, last, raw_last, background.',
