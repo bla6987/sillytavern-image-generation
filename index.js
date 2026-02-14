@@ -1,5 +1,5 @@
 import { getContext, extension_settings } from '../../../extensions.js';
-import { generateQuietPrompt } from '../../../../script.js';
+import { generateQuietPrompt, generateRaw } from '../../../../script.js';
 import { eventSource, event_types } from '../../../../script.js';
 import { saveSettingsDebounced } from '../../../../script.js';
 
@@ -30,9 +30,32 @@ const orderedModes = [
 
 const validModes = new Set(orderedModes);
 
+const promptEngineMode = {
+    RAW: 'raw',
+    QUIET_THEN_RAW: 'quiet_then_raw',
+    QUIET_ONLY: 'quiet_only',
+};
+
+const validPromptEngineModes = new Set(Object.values(promptEngineMode));
+
+const rawContextMode = {
+    TEMPLATE_ONLY: 'template_only',
+    RECENT_CONTEXT: 'recent_context',
+    FULL_CONTEXT: 'full_context',
+};
+
+const validRawContextModes = new Set(Object.values(rawContextMode));
+
+const RAW_CONTEXT_TOTAL_CHAR_LIMIT = 6000;
+
 const defaultSettings = {
     mode: generationMode.CHARACTER,
     prefix: 'best quality, absurdres, aesthetic,',
+    prompt_engine_mode: promptEngineMode.RAW,
+    raw_context_mode: rawContextMode.RECENT_CONTEXT,
+    raw_context_messages: 4,
+    raw_context_chars_per_message: 400,
+    raw_response_length: 220,
 };
 
 // Exact ST default templates for visible modes.
@@ -101,6 +124,23 @@ function normalizeMode(mode) {
     return validModes.has(mode) ? mode : generationMode.CHARACTER;
 }
 
+function normalizePromptEngineMode(mode) {
+    return validPromptEngineModes.has(mode) ? mode : promptEngineMode.RAW;
+}
+
+function normalizeRawContextMode(mode) {
+    return validRawContextModes.has(mode) ? mode : rawContextMode.RECENT_CONTEXT;
+}
+
+function clampNumber(value, fallback, min, max) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) {
+        return fallback;
+    }
+    const rounded = Math.round(numericValue);
+    return Math.min(max, Math.max(min, rounded));
+}
+
 function loadSettings() {
     extension_settings[extensionName] = extension_settings[extensionName] || {};
     Object.assign(extension_settings[extensionName], {
@@ -124,25 +164,97 @@ function loadSettings() {
         changed = true;
     }
 
+    const normalizedPromptEngineMode = normalizePromptEngineMode(settings.prompt_engine_mode);
+    if (settings.prompt_engine_mode !== normalizedPromptEngineMode) {
+        settings.prompt_engine_mode = normalizedPromptEngineMode;
+        changed = true;
+    }
+
+    const normalizedRawContextMode = normalizeRawContextMode(settings.raw_context_mode);
+    if (settings.raw_context_mode !== normalizedRawContextMode) {
+        settings.raw_context_mode = normalizedRawContextMode;
+        changed = true;
+    }
+
+    const normalizedRawContextMessages = clampNumber(settings.raw_context_messages, defaultSettings.raw_context_messages, 1, 10);
+    if (settings.raw_context_messages !== normalizedRawContextMessages) {
+        settings.raw_context_messages = normalizedRawContextMessages;
+        changed = true;
+    }
+
+    const normalizedRawContextCharsPerMessage = clampNumber(settings.raw_context_chars_per_message, defaultSettings.raw_context_chars_per_message, 100, 1000);
+    if (settings.raw_context_chars_per_message !== normalizedRawContextCharsPerMessage) {
+        settings.raw_context_chars_per_message = normalizedRawContextCharsPerMessage;
+        changed = true;
+    }
+
+    const normalizedRawResponseLength = clampNumber(settings.raw_response_length, defaultSettings.raw_response_length, 64, 512);
+    if (settings.raw_response_length !== normalizedRawResponseLength) {
+        settings.raw_response_length = normalizedRawResponseLength;
+        changed = true;
+    }
+
     if (changed) {
         saveSettingsDebounced();
     }
+}
+
+function updateRawContextSettingsVisibility() {
+    const rawContextModeValue = String($('#igc_raw_context_mode').val() || rawContextMode.RECENT_CONTEXT);
+    const showContextLimits = rawContextModeValue !== rawContextMode.TEMPLATE_ONLY;
+    $('#igc_raw_context_messages_row').toggleClass('igc-hidden', !showContextLimits);
+    $('#igc_raw_context_chars_row').toggleClass('igc-hidden', !showContextLimits);
 }
 
 function updateUIFromSettings() {
     const settings = getSettings();
     $('#igc_mode').val(settings.mode);
     $('#igc_prefix').val(settings.prefix);
+    $('#igc_prompt_engine_mode').val(settings.prompt_engine_mode);
+    $('#igc_raw_context_mode').val(settings.raw_context_mode);
+    $('#igc_raw_context_messages').val(settings.raw_context_messages);
+    $('#igc_raw_context_chars_per_message').val(settings.raw_context_chars_per_message);
+    $('#igc_raw_response_length').val(settings.raw_response_length);
+    updateRawContextSettingsVisibility();
 }
 
 function bindUIEvents() {
     $('#igc_mode').on('change', function () {
-        getSettings().mode = normalizeMode(parseInt($(this).val()));
+        getSettings().mode = normalizeMode(parseInt($(this).val(), 10));
         saveSettings();
     });
 
     $('#igc_prefix').on('change', function () {
         getSettings().prefix = String($(this).val() || '');
+        saveSettings();
+    });
+
+    $('#igc_prompt_engine_mode').on('change', function () {
+        getSettings().prompt_engine_mode = normalizePromptEngineMode(String($(this).val() || promptEngineMode.RAW));
+        saveSettings();
+    });
+
+    $('#igc_raw_context_mode').on('change', function () {
+        getSettings().raw_context_mode = normalizeRawContextMode(String($(this).val() || rawContextMode.RECENT_CONTEXT));
+        updateRawContextSettingsVisibility();
+        saveSettings();
+    });
+
+    $('#igc_raw_context_messages').on('change', function () {
+        getSettings().raw_context_messages = clampNumber($(this).val(), defaultSettings.raw_context_messages, 1, 10);
+        $(this).val(getSettings().raw_context_messages);
+        saveSettings();
+    });
+
+    $('#igc_raw_context_chars_per_message').on('change', function () {
+        getSettings().raw_context_chars_per_message = clampNumber($(this).val(), defaultSettings.raw_context_chars_per_message, 100, 1000);
+        $(this).val(getSettings().raw_context_chars_per_message);
+        saveSettings();
+    });
+
+    $('#igc_raw_response_length').on('change', function () {
+        getSettings().raw_response_length = clampNumber($(this).val(), defaultSettings.raw_response_length, 64, 512);
+        $(this).val(getSettings().raw_response_length);
         saveSettings();
     });
 
@@ -197,22 +309,211 @@ async function callQuietPrompt(quietPrompt) {
     }
 }
 
-async function generatePromptWithLLM(mode) {
+function getTemplateByMode(mode) {
     const template = promptTemplates[mode];
-
     if (!template) {
         throw new Error(`Unknown mode: ${mode}`);
     }
+    return template;
+}
 
-    const quietPrompt = processTemplate(template);
-    const response = await callQuietPrompt(quietPrompt);
-    const processed = processReply(response);
+function truncateWithEllipsis(text, maxLength) {
+    if (text.length <= maxLength) {
+        return text;
+    }
+    if (maxLength <= 3) {
+        return text.slice(0, maxLength);
+    }
+    return `${text.slice(0, maxLength - 3).trimEnd()}...`;
+}
 
-    if (!processed) {
-        throw new Error('Prompt generation produced no text');
+function sanitizeContextText(value, maxLength = null) {
+    if (typeof value !== 'string') {
+        return '';
+    }
+    const collapsed = value.replace(/\s+/g, ' ').trim();
+    if (!collapsed) {
+        return '';
+    }
+    if (typeof maxLength === 'number' && maxLength > 0) {
+        return truncateWithEllipsis(collapsed, maxLength);
+    }
+    return collapsed;
+}
+
+function getChatMessageText(message) {
+    if (!message || typeof message !== 'object') {
+        return '';
     }
 
+    if (typeof message.mes === 'string') {
+        return message.mes;
+    }
+
+    if (typeof message.message === 'string') {
+        return message.message;
+    }
+
+    if (typeof message.content === 'string') {
+        return message.content;
+    }
+
+    return '';
+}
+
+function getChatMessageSpeaker(message, context) {
+    const nameCandidate = sanitizeContextText(message?.name ?? message?.original_name);
+    if (nameCandidate) {
+        return nameCandidate;
+    }
+    if (message?.is_user) {
+        return sanitizeContextText(context?.name1 || 'User');
+    }
+    return sanitizeContextText(context?.name2 || 'Character');
+}
+
+function collectContextEntries({
+    maxMessages,
+    maxCharsPerMessage,
+    totalCharLimit = RAW_CONTEXT_TOTAL_CHAR_LIMIT,
+}) {
+    const context = getContext();
+    const chat = Array.isArray(context?.chat) ? context.chat : [];
+
+    if (!chat.length) {
+        return [];
+    }
+
+    const entries = [];
+    let totalChars = 0;
+
+    for (let idx = chat.length - 1; idx >= 0; idx--) {
+        if (entries.length >= maxMessages) {
+            break;
+        }
+
+        const message = chat[idx];
+        if (!message || message.is_system) {
+            continue;
+        }
+
+        const text = sanitizeContextText(getChatMessageText(message), maxCharsPerMessage);
+        if (!text) {
+            continue;
+        }
+
+        const speaker = getChatMessageSpeaker(message, context) || 'Character';
+        const entry = `${speaker}: ${text}`;
+        if (entry.length > totalCharLimit && entries.length === 0) {
+            entries.unshift(truncateWithEllipsis(entry, totalCharLimit));
+            break;
+        }
+
+        if (totalChars + entry.length > totalCharLimit) {
+            break;
+        }
+
+        entries.unshift(entry);
+        totalChars += entry.length;
+    }
+
+    return entries;
+}
+
+function buildContextBlock(rawContextModeSetting, settings) {
+    if (rawContextModeSetting === rawContextMode.TEMPLATE_ONLY) {
+        return '';
+    }
+
+    const maxMessages = rawContextModeSetting === rawContextMode.FULL_CONTEXT
+        ? Number.MAX_SAFE_INTEGER
+        : settings.raw_context_messages;
+    const entries = collectContextEntries({
+        maxMessages,
+        maxCharsPerMessage: settings.raw_context_chars_per_message,
+        totalCharLimit: RAW_CONTEXT_TOTAL_CHAR_LIMIT,
+    });
+
+    if (!entries.length) {
+        return '';
+    }
+
+    const header = rawContextModeSetting === rawContextMode.FULL_CONTEXT
+        ? 'Full chat context:'
+        : 'Recent chat context:';
+    return `${header}\n${entries.join('\n')}`;
+}
+
+function buildRawPromptInput(mode) {
+    const settings = getSettings();
+    const template = processTemplate(getTemplateByMode(mode));
+    const normalizedContextMode = normalizeRawContextMode(settings.raw_context_mode);
+    const contextBlock = buildContextBlock(normalizedContextMode, settings);
+
+    if (!contextBlock) {
+        return template;
+    }
+
+    return `${template}\n\nUse the context below only as visual scene reference.\n${contextBlock}`;
+}
+
+function processGeneratedPrompt(rawResponse, source) {
+    const processed = processReply(rawResponse);
+    if (!processed) {
+        throw new Error(`Prompt generation failed (${source}): no text returned.`);
+    }
     return processed;
+}
+
+async function generatePromptWithQuiet(mode) {
+    const quietPrompt = processTemplate(getTemplateByMode(mode));
+    console.debug(`[IGC] Prompt generation engine=quiet inputLength=${quietPrompt.length}`);
+    const response = await callQuietPrompt(quietPrompt);
+    const processed = processGeneratedPrompt(response, 'quiet');
+    console.debug(`[IGC] Prompt generation engine=quiet outputLength=${processed.length}`);
+    return processed;
+}
+
+async function generatePromptWithRaw(mode) {
+    const settings = getSettings();
+    const rawPrompt = buildRawPromptInput(mode);
+    console.debug(`[IGC] Prompt generation engine=raw contextMode=${settings.raw_context_mode} inputLength=${rawPrompt.length}`);
+    const response = await generateRaw({
+        prompt: rawPrompt,
+        responseLength: settings.raw_response_length,
+        trimNames: true,
+    });
+    const processed = processGeneratedPrompt(response, 'raw');
+    console.debug(`[IGC] Prompt generation engine=raw contextMode=${settings.raw_context_mode} outputLength=${processed.length}`);
+    return processed;
+}
+
+async function generatePromptWithLLM(mode) {
+    const settings = getSettings();
+    const engineMode = normalizePromptEngineMode(settings.prompt_engine_mode);
+
+    if (engineMode === promptEngineMode.QUIET_ONLY) {
+        const result = await generatePromptWithQuiet(mode);
+        console.debug(`[IGC] Prompt generation complete engine=${engineMode} fallbackUsed=false`);
+        return result;
+    }
+
+    if (engineMode === promptEngineMode.QUIET_THEN_RAW) {
+        try {
+            const result = await generatePromptWithQuiet(mode);
+            console.debug(`[IGC] Prompt generation complete engine=${engineMode} fallbackUsed=false`);
+            return result;
+        } catch (error) {
+            console.warn(`[IGC] Quiet prompt failed, retrying with raw mode: ${error?.message || error}`);
+            const result = await generatePromptWithRaw(mode);
+            console.debug(`[IGC] Prompt generation complete engine=${engineMode} fallbackUsed=true`);
+            return result;
+        }
+    }
+
+    const result = await generatePromptWithRaw(mode);
+    console.debug(`[IGC] Prompt generation complete engine=${engineMode} fallbackUsed=false`);
+    return result;
 }
 
 function buildFinalPrompt(generatedPrompt) {
@@ -228,11 +529,47 @@ function buildFinalPrompt(generatedPrompt) {
     return parts.join(', ');
 }
 
+function isPromptReviewEnabled() {
+    const context = getContext();
+    return context?.extensionSettings?.sd?.refine_mode === true;
+}
+
+async function maybeReviewPrompt(prompt) {
+    if (!isPromptReviewEnabled()) {
+        return prompt;
+    }
+
+    const context = getContext();
+    const popupFn = context?.callGenericPopup;
+    const popupTypeInput = context?.POPUP_TYPE?.INPUT;
+
+    if (typeof popupFn !== 'function' || popupTypeInput === undefined) {
+        return prompt;
+    }
+
+    const promptText = '<h3>Review and edit the prompt:</h3>Press "Cancel" to abort the image generation.';
+    const reviewedPrompt = await popupFn(promptText, popupTypeInput, prompt.trim(), { rows: 8, okButton: 'Continue' });
+
+    if (reviewedPrompt) {
+        return String(reviewedPrompt);
+    }
+
+    throw new Error('Generation aborted by user.');
+}
+
 async function executeSTImageGeneration(prompt) {
     try {
         const { executeSlashCommandsWithOptions } = await import('../../../slash-commands.js');
         const escapedPrompt = prompt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        await executeSlashCommandsWithOptions(`/sd raw=true "${escapedPrompt}"`);
+        const result = await executeSlashCommandsWithOptions(`/sd raw=true "${escapedPrompt}"`, {
+            handleParserErrors: false,
+            handleExecutionErrors: false,
+        });
+
+        if (!result || result.isError || result.isAborted || !result.pipe) {
+            const reason = result?.errorMessage || result?.abortReason || 'No image URL returned from /sd command.';
+            throw new Error(reason);
+        }
     } catch (error) {
         throw new Error(`Failed to execute /sd command: ${error.message}`);
     }
@@ -250,10 +587,16 @@ async function generateImage(overrideMode = null) {
     try {
         const generatedPrompt = await generatePromptWithLLM(mode);
         const finalPrompt = buildFinalPrompt(generatedPrompt);
-        await executeSTImageGeneration(finalPrompt);
+        const reviewedPrompt = await maybeReviewPrompt(finalPrompt);
+        await executeSTImageGeneration(reviewedPrompt);
         toastr.success('Image generated successfully!');
     } catch (error) {
-        toastr.error(`Generation failed: ${error.message}`);
+        const message = String(error?.message || 'Unknown error');
+        if (/aborted by user|canceled|cancelled/i.test(message)) {
+            toastr.warning('Image generation canceled.');
+        } else {
+            toastr.error(`Generation failed: ${message}`);
+        }
     } finally {
         $button.prop('disabled', false).html(originalHtml);
     }

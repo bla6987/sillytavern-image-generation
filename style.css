@@ -48,6 +48,10 @@
     gap: 10px;
 }
 
+.igc-hidden {
+    display: none;
+}
+
 .igc-settings-row label {
     min-width: 150px;
 }

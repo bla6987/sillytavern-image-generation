@@ -27,6 +27,39 @@
                 <textarea id="igc_prefix" placeholder="best quality, absurdres, aesthetic,"></textarea>
             </div>
 
+            <div class="igc-settings-row">
+                <label for="igc_prompt_engine_mode">Prompt Engine:</label>
+                <select id="igc_prompt_engine_mode">
+                    <option value="raw">Raw (recommended)</option>
+                    <option value="quiet_then_raw">Quiet then Raw fallback</option>
+                    <option value="quiet_only">Quiet only</option>
+                </select>
+            </div>
+
+            <div class="igc-settings-row">
+                <label for="igc_raw_context_mode">Raw Context Mode:</label>
+                <select id="igc_raw_context_mode">
+                    <option value="recent_context">Recent context (recommended)</option>
+                    <option value="template_only">Template only</option>
+                    <option value="full_context">Full context (capped)</option>
+                </select>
+            </div>
+
+            <div class="igc-settings-row" id="igc_raw_context_messages_row">
+                <label for="igc_raw_context_messages">Recent Messages:</label>
+                <input id="igc_raw_context_messages" type="number" min="1" max="10" step="1">
+            </div>
+
+            <div class="igc-settings-row" id="igc_raw_context_chars_row">
+                <label for="igc_raw_context_chars_per_message">Chars Per Message:</label>
+                <input id="igc_raw_context_chars_per_message" type="number" min="100" max="1000" step="50">
+            </div>
+
+            <div class="igc-settings-row">
+                <label for="igc_raw_response_length">Raw Response Length:</label>
+                <input id="igc_raw_response_length" type="number" min="64" max="512" step="16">
+            </div>
+
             <!-- Generate Button -->
             <div class="igc-settings-row">
                 <button id="igc_generate_button" class="menu_button igc-generate-button">
