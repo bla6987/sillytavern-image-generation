@@ -160,6 +160,53 @@
     }
 }
 
+/* Prompt review popup controls */
+.igc-review-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.igc-review-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.igc-review-row label {
+    min-width: 90px;
+    flex-shrink: 0;
+}
+
+.igc-review-select {
+    flex: 1;
+    min-width: 0;
+}
+
+.igc-model-select {
+    min-width: 200px;
+}
+
+.igc-or-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 5px;
+}
+
+.igc-refresh-btn {
+    flex-shrink: 0;
+    padding: 4px 8px;
+    min-width: unset;
+}
+
+.igc-refresh-btn i {
+    pointer-events: none;
+}
+
 /* Generated image container */
 .igc-image-container {
     max-width: 100%;

@@ -2,7 +2,10 @@ import { Popper } from '../../../../lib.js';
 import { getContext, extension_settings } from '../../../extensions.js';
 import { generateQuietPrompt, generateRaw } from '../../../../script.js';
 import { eventSource, event_types } from '../../../../script.js';
-import { saveSettingsDebounced } from '../../../../script.js';
+import { getRequestHeaders, saveSettingsDebounced } from '../../../../script.js';
+import { saveBase64AsFile } from '../../../utils.js';
+import { secret_state, SECRET_KEYS } from '../../../secrets.js';
+import { humanizedDateTime, getMessageTimeStamp } from '../../../RossAscends-mods.js';
 
 const extensionName = 'image_generation';
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
@@ -51,6 +54,45 @@ const rawContextMode = {
 
 const validRawContextModes = new Set(Object.values(rawContextMode));
 
+const backendType = { DEFAULT: 'default', OPENROUTER: 'openrouter' };
+const validBackends = new Set(Object.values(backendType));
+
+const openRouterAspectRatios = {
+    '16:9': 16 / 9,
+    '1:1': 1,
+    '21:9': 21 / 9,
+    '2:3': 2 / 3,
+    '3:2': 3 / 2,
+    '4:5': 4 / 5,
+    '5:4': 5 / 4,
+    '9:16': 9 / 16,
+    '9:21': 9 / 21,
+};
+
+function getClosestAspectRatio(width, height) {
+    const ratio = width / height;
+    let closest = '1:1';
+    let minDiff = Infinity;
+    for (const [key, value] of Object.entries(openRouterAspectRatios)) {
+        const diff = Math.abs(ratio - value);
+        if (diff < minDiff) {
+            minDiff = diff;
+            closest = key;
+        }
+    }
+    return closest;
+}
+
+function getSDSettingsAspectRatio() {
+    const sdSettings = extension_settings?.sd;
+    const width = Number(sdSettings?.width);
+    const height = Number(sdSettings?.height);
+    if (width > 0 && height > 0) {
+        return getClosestAspectRatio(width, height);
+    }
+    return '1:1';
+}
+
 const RAW_CONTEXT_TOTAL_CHAR_LIMIT = 6000;
 
 const defaultSettings = {
@@ -61,6 +103,8 @@ const defaultSettings = {
     raw_context_messages: 4,
     raw_context_chars_per_message: 400,
     raw_response_length: 220,
+    backend: backendType.DEFAULT,
+    openrouter_model: '',
 };
 
 // Exact ST default templates for visible modes.
@@ -137,6 +181,10 @@ function normalizeRawContextMode(mode) {
     return validRawContextModes.has(mode) ? mode : rawContextMode.RECENT_CONTEXT;
 }
 
+function normalizeBackend(backend) {
+    return validBackends.has(backend) ? backend : backendType.DEFAULT;
+}
+
 function clampNumber(value, fallback, min, max) {
     const numericValue = Number(value);
     if (!Number.isFinite(numericValue)) {
@@ -196,6 +244,17 @@ function loadSettings() {
     const normalizedRawResponseLength = clampNumber(settings.raw_response_length, defaultSettings.raw_response_length, 64, 512);
     if (settings.raw_response_length !== normalizedRawResponseLength) {
         settings.raw_response_length = normalizedRawResponseLength;
+        changed = true;
+    }
+
+    const normalizedBackend = normalizeBackend(settings.backend);
+    if (settings.backend !== normalizedBackend) {
+        settings.backend = normalizedBackend;
+        changed = true;
+    }
+
+    if (typeof settings.openrouter_model !== 'string') {
+        settings.openrouter_model = defaultSettings.openrouter_model;
         changed = true;
     }
 
@@ -534,32 +593,195 @@ function buildFinalPrompt(generatedPrompt) {
     return parts.join(', ');
 }
 
-function isPromptReviewEnabled() {
-    const context = getContext();
-    return context?.extensionSettings?.sd?.refine_mode === true;
-}
+let cachedOpenRouterModels = null;
 
-async function maybeReviewPrompt(prompt) {
-    if (!isPromptReviewEnabled()) {
-        return prompt;
+async function fetchOpenRouterModels(forceRefresh = false) {
+    if (cachedOpenRouterModels && !forceRefresh) {
+        return cachedOpenRouterModels;
     }
 
+    const result = await fetch('/api/openrouter/models/image', {
+        method: 'POST',
+        headers: getRequestHeaders({ omitContentType: true }),
+    });
+
+    if (result.ok) {
+        cachedOpenRouterModels = await result.json();
+        return cachedOpenRouterModels;
+    }
+
+    return [];
+}
+
+async function showReviewPopup(prompt) {
     const context = getContext();
     const popupFn = context?.callGenericPopup;
     const popupTypeInput = context?.POPUP_TYPE?.INPUT;
 
     if (typeof popupFn !== 'function' || popupTypeInput === undefined) {
-        return prompt;
+        return { prompt, backend: backendType.DEFAULT, model: '' };
     }
 
-    const promptText = '<h3>Review and edit the prompt:</h3>Press "Cancel" to abort the image generation.';
-    const reviewedPrompt = await popupFn(promptText, popupTypeInput, prompt.trim(), { rows: 8, okButton: 'Continue' });
+    const settings = getSettings();
+    let selectedBackend = normalizeBackend(settings.backend);
+    let selectedModel = settings.openrouter_model || '';
 
-    if (reviewedPrompt) {
-        return String(reviewedPrompt);
+    const $content = $('<div class="igc-review-controls"></div>');
+
+    // Backend row
+    const $backendRow = $('<div class="igc-review-row"></div>');
+    const $backendSelect = $('<select class="igc-review-select"></select>');
+    $backendSelect.append('<option value="default">Default (SD)</option>');
+    $backendSelect.append('<option value="openrouter">OpenRouter</option>');
+    $backendSelect.val(selectedBackend);
+    $backendRow.append('<label>Backend:</label>').append($backendSelect);
+    $content.append($backendRow);
+
+    // OpenRouter settings container
+    const $orSettings = $('<div class="igc-or-settings"></div>');
+
+    // Model row
+    const $modelRow = $('<div class="igc-review-row"></div>');
+    const $modelSelect = $('<select class="igc-review-select igc-model-select"></select>');
+    const $refreshBtn = $('<button class="igc-refresh-btn menu_button" title="Refresh models"><i class="fa-solid fa-arrows-rotate"></i></button>');
+    $modelRow.append('<label>Model:</label>').append($modelSelect).append($refreshBtn);
+    $orSettings.append($modelRow);
+
+    $content.append($orSettings);
+
+    function updateORVisibility() {
+        $orSettings.toggle(selectedBackend === backendType.OPENROUTER);
+    }
+    updateORVisibility();
+
+    async function loadModels(forceRefresh = false) {
+        $modelSelect.empty().append('<option value="">Loading...</option>').prop('disabled', true);
+        $refreshBtn.prop('disabled', true);
+        try {
+            const models = await fetchOpenRouterModels(forceRefresh);
+            $modelSelect.empty();
+            if (models.length === 0) {
+                $modelSelect.append('<option value="">No models available</option>');
+            } else {
+                for (const model of models) {
+                    $modelSelect.append(`<option value="${model.value}">${model.text}</option>`);
+                }
+                if (selectedModel && models.some(m => m.value === selectedModel)) {
+                    $modelSelect.val(selectedModel);
+                } else if (models.length > 0) {
+                    selectedModel = models[0].value;
+                    $modelSelect.val(selectedModel);
+                }
+            }
+        } catch (e) {
+            $modelSelect.empty().append('<option value="">Failed to load models</option>');
+            console.error('[IGC] Failed to load OpenRouter models:', e);
+        }
+        $modelSelect.prop('disabled', false);
+        $refreshBtn.prop('disabled', false);
     }
 
-    throw new Error('Generation aborted by user.');
+    $backendSelect.on('change', function () {
+        selectedBackend = normalizeBackend($(this).val());
+        updateORVisibility();
+        if (selectedBackend === backendType.OPENROUTER) {
+            loadModels();
+        }
+    });
+
+    $modelSelect.on('change', function () {
+        selectedModel = String($(this).val() || '');
+    });
+
+    $refreshBtn.on('click', function () {
+        loadModels(true);
+    });
+
+    if (selectedBackend === backendType.OPENROUTER) {
+        loadModels();
+    }
+
+    const result = await popupFn($content, popupTypeInput, prompt, {
+        rows: 8, okButton: 'Generate', cancelButton: 'Cancel', wide: true,
+    });
+
+    if (result === null || result === undefined || result === false) {
+        throw new Error('Generation aborted by user.');
+    }
+
+    // Remember model but always reset backend to default
+    settings.openrouter_model = selectedModel;
+    settings.backend = backendType.DEFAULT;
+    saveSettings();
+
+    return {
+        prompt: String(result),
+        backend: selectedBackend,
+        model: selectedModel,
+    };
+}
+
+async function generateOpenRouterImage(prompt, model, aspectRatio) {
+    if (!secret_state[SECRET_KEYS.OPENROUTER]) {
+        throw new Error('OpenRouter API key not set. Configure it in SillyTavern API settings.');
+    }
+
+    if (!model) {
+        throw new Error('No OpenRouter model selected.');
+    }
+
+    const result = await fetch('/api/openrouter/image/generate', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            model: model,
+            prompt: prompt,
+            aspect_ratio: aspectRatio,
+        }),
+    });
+
+    if (result.ok) {
+        const data = await result.json();
+        return { format: 'jpg', data: data.image };
+    }
+
+    const text = await result.text();
+    throw new Error(text);
+}
+
+async function saveAndDisplayImage(imageData, prompt) {
+    const context = getContext();
+    const characterName = context.name2 || 'Unknown';
+    const filename = `${characterName}_${humanizedDateTime()}`;
+    const imagePath = await saveBase64AsFile(imageData.data, characterName, filename, imageData.format);
+
+    const message = {
+        name: characterName,
+        is_user: false,
+        is_system: false,
+        send_date: getMessageTimeStamp(),
+        mes: prompt,
+        extra: {
+            media: [{
+                url: imagePath,
+                type: 'image',
+                title: prompt,
+                source: 'generated',
+            }],
+            media_display: 'gallery',
+            media_index: 0,
+            inline_image: false,
+        },
+    };
+
+    context.chat.push(message);
+    const messageId = context.chat.length - 1;
+    await eventSource.emit(event_types.MESSAGE_RECEIVED, messageId, 'extension');
+    context.addOneMessage(message);
+    await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, messageId, 'extension');
+    await context.saveChat();
+
+    return imagePath;
 }
 
 async function executeSTImageGeneration(prompt) {
@@ -611,26 +833,45 @@ async function generateImage(overrideMode = null) {
     try {
         const generatedPrompt = await generatePromptWithLLM(mode);
         const finalPrompt = buildFinalPrompt(generatedPrompt);
-        const reviewedPrompt = await maybeReviewPrompt(finalPrompt);
-        const imagePath = await executeSTImageGeneration(reviewedPrompt);
+        const reviewResult = await showReviewPopup(finalPrompt);
 
-        if (mode === generationMode.BACKGROUND) {
-            let backgroundApplied = true;
-            try {
-                await applyGeneratedBackground(imagePath);
-            } catch (error) {
-                backgroundApplied = false;
-                console.warn('[IGC] Failed to auto-apply generated background:', error);
-                toastr.warning('Image generated, but setting background failed.');
-            }
+        if (reviewResult.backend === backendType.OPENROUTER) {
+            const aspectRatio = getSDSettingsAspectRatio();
+            const imageData = await generateOpenRouterImage(reviewResult.prompt, reviewResult.model, aspectRatio);
+            const savedImagePath = await saveAndDisplayImage(imageData, reviewResult.prompt);
 
-            if (backgroundApplied) {
-                toastr.success('Image generated and set as background!');
+            if (mode === generationMode.BACKGROUND) {
+                try {
+                    await applyGeneratedBackground(savedImagePath);
+                    toastr.success('Image generated and set as background!');
+                } catch (bgError) {
+                    console.warn('[IGC] Failed to auto-apply generated background:', bgError);
+                    toastr.warning('Image generated, but setting background failed.');
+                }
             } else {
                 toastr.success('Image generated successfully!');
             }
         } else {
-            toastr.success('Image generated successfully!');
+            const imagePath = await executeSTImageGeneration(reviewResult.prompt);
+
+            if (mode === generationMode.BACKGROUND) {
+                let backgroundApplied = true;
+                try {
+                    await applyGeneratedBackground(imagePath);
+                } catch (error) {
+                    backgroundApplied = false;
+                    console.warn('[IGC] Failed to auto-apply generated background:', error);
+                    toastr.warning('Image generated, but setting background failed.');
+                }
+
+                if (backgroundApplied) {
+                    toastr.success('Image generated and set as background!');
+                } else {
+                    toastr.success('Image generated successfully!');
+                }
+            } else {
+                toastr.success('Image generated successfully!');
+            }
         }
     } catch (error) {
         const message = String(error?.message || 'Unknown error');
