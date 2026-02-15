@@ -508,9 +508,9 @@ function buildContextBlock(rawContextModeSetting, settings) {
     return `${header}\n${entries.join('\n')}`;
 }
 
-function buildRawPromptInput(mode) {
+function buildRawPromptInput(mode, customPrompt = null) {
     const settings = getSettings();
-    const template = processTemplate(getTemplateByMode(mode));
+    const template = customPrompt ? processTemplate(customPrompt) : processTemplate(getTemplateByMode(mode));
     const normalizedContextMode = normalizeRawContextMode(settings.raw_context_mode);
     const contextBlock = buildContextBlock(normalizedContextMode, settings);
 
@@ -529,8 +529,8 @@ function processGeneratedPrompt(rawResponse, source) {
     return processed;
 }
 
-async function generatePromptWithQuiet(mode) {
-    const quietPrompt = processTemplate(getTemplateByMode(mode));
+async function generatePromptWithQuiet(mode, customPrompt = null) {
+    const quietPrompt = customPrompt ? processTemplate(customPrompt) : processTemplate(getTemplateByMode(mode));
     console.debug(`[IGC] Prompt generation engine=quiet inputLength=${quietPrompt.length}`);
     const response = await callQuietPrompt(quietPrompt);
     const processed = processGeneratedPrompt(response, 'quiet');
@@ -538,9 +538,9 @@ async function generatePromptWithQuiet(mode) {
     return processed;
 }
 
-async function generatePromptWithRaw(mode) {
+async function generatePromptWithRaw(mode, customPrompt = null) {
     const settings = getSettings();
-    const rawPrompt = buildRawPromptInput(mode);
+    const rawPrompt = buildRawPromptInput(mode, customPrompt);
     console.debug(`[IGC] Prompt generation engine=raw contextMode=${settings.raw_context_mode} inputLength=${rawPrompt.length}`);
     const response = await generateRaw({
         prompt: rawPrompt,
@@ -552,30 +552,30 @@ async function generatePromptWithRaw(mode) {
     return processed;
 }
 
-async function generatePromptWithLLM(mode) {
+async function generatePromptWithLLM(mode, customPrompt = null) {
     const settings = getSettings();
     const engineMode = normalizePromptEngineMode(settings.prompt_engine_mode);
 
     if (engineMode === promptEngineMode.QUIET_ONLY) {
-        const result = await generatePromptWithQuiet(mode);
+        const result = await generatePromptWithQuiet(mode, customPrompt);
         console.debug(`[IGC] Prompt generation complete engine=${engineMode} fallbackUsed=false`);
         return result;
     }
 
     if (engineMode === promptEngineMode.QUIET_THEN_RAW) {
         try {
-            const result = await generatePromptWithQuiet(mode);
+            const result = await generatePromptWithQuiet(mode, customPrompt);
             console.debug(`[IGC] Prompt generation complete engine=${engineMode} fallbackUsed=false`);
             return result;
         } catch (error) {
             console.warn(`[IGC] Quiet prompt failed, retrying with raw mode: ${error?.message || error}`);
-            const result = await generatePromptWithRaw(mode);
+            const result = await generatePromptWithRaw(mode, customPrompt);
             console.debug(`[IGC] Prompt generation complete engine=${engineMode} fallbackUsed=true`);
             return result;
         }
     }
 
-    const result = await generatePromptWithRaw(mode);
+    const result = await generatePromptWithRaw(mode, customPrompt);
     console.debug(`[IGC] Prompt generation complete engine=${engineMode} fallbackUsed=false`);
     return result;
 }
@@ -636,6 +636,12 @@ async function showReviewPopup(prompt) {
     $backendSelect.val(selectedBackend);
     $backendRow.append('<label>Backend:</label>').append($backendSelect);
     $content.append($backendRow);
+
+    // As background checkbox row
+    const $bgRow = $('<div class="igc-review-row"></div>');
+    const $bgCheckbox = $('<input type="checkbox" id="igc_as_background" />');
+    $bgRow.append($bgCheckbox).append('<label for="igc_as_background">As background</label>');
+    $content.append($bgRow);
 
     // OpenRouter settings container
     const $orSettings = $('<div class="igc-or-settings"></div>');
@@ -718,6 +724,7 @@ async function showReviewPopup(prompt) {
         prompt: String(result),
         backend: selectedBackend,
         model: selectedModel,
+        asBackground: $bgCheckbox.prop('checked'),
     };
 }
 
@@ -837,7 +844,7 @@ function injectSetBackgroundButtons() {
     });
 }
 
-async function generateImage(overrideMode = null) {
+async function generateImage(overrideMode = null, customPrompt = null) {
     const settings = getSettings();
     const requestedMode = overrideMode !== null ? overrideMode : settings.mode;
     const mode = normalizeMode(Number(requestedMode));
@@ -847,16 +854,18 @@ async function generateImage(overrideMode = null) {
     $button.prop('disabled', true).html('<span class="igc-loading"></span> Generating...');
 
     try {
-        const generatedPrompt = await generatePromptWithLLM(mode);
+        const generatedPrompt = await generatePromptWithLLM(mode, customPrompt);
         const finalPrompt = buildFinalPrompt(generatedPrompt);
         const reviewResult = await showReviewPopup(finalPrompt);
+
+        const applyAsBackground = mode === generationMode.BACKGROUND || reviewResult.asBackground;
 
         if (reviewResult.backend === backendType.OPENROUTER) {
             const aspectRatio = getSDSettingsAspectRatio();
             const imageData = await generateOpenRouterImage(reviewResult.prompt, reviewResult.model, aspectRatio);
             const savedImagePath = await saveAndDisplayImage(imageData, reviewResult.prompt);
 
-            if (mode === generationMode.BACKGROUND) {
+            if (applyAsBackground) {
                 try {
                     await applyGeneratedBackground(savedImagePath);
                     toastr.success('Image generated and set as background!');
@@ -870,7 +879,7 @@ async function generateImage(overrideMode = null) {
         } else {
             const imagePath = await executeSTImageGeneration(reviewResult.prompt);
 
-            if (mode === generationMode.BACKGROUND) {
+            if (applyAsBackground) {
                 let backgroundApplied = true;
                 try {
                     await applyGeneratedBackground(imagePath);
@@ -1172,6 +1181,11 @@ function parseMode(modeInput) {
     return generationMode.CHARACTER;
 }
 
+function isKnownModeKeyword(input) {
+    const normalized = String(input).trim().toLowerCase();
+    return Object.values(triggerWords).some(words => words.includes(normalized));
+}
+
 function getModeEnumList() {
     return orderedModes.flatMap(mode => triggerWords[mode]);
 }
@@ -1184,26 +1198,6 @@ function normalizeSlashArg(unnamedArgs) {
         return '';
     }
     return String(unnamedArgs).trim();
-}
-
-function getSlashModeInput(namedArgs, unnamedArgs) {
-    const namedMode = namedArgs?.mode;
-    if (namedMode !== undefined && namedMode !== null && String(namedMode).trim().length > 0) {
-        return String(namedMode);
-    }
-
-    const argText = normalizeSlashArg(unnamedArgs);
-    if (!argText) {
-        return '';
-    }
-
-    // Compatibility for legacy command registration where mode may be passed in unnamed text.
-    const modeMatch = argText.match(/(?:^|\s)mode\s*=\s*([^\s]+)/i);
-    if (modeMatch?.[1]) {
-        return modeMatch[1];
-    }
-
-    return argText;
 }
 
 function registerSlashCommands() {
@@ -1222,13 +1216,20 @@ function registerSlashCommands() {
             registerSlashCommand,
         } = context;
 
-        const commandHelp = 'Generate an image using default SillyTavern image-generation modes. Supported mode values: you, face, me, scene, last, raw_last, background.';
+        const commandHelp = 'Generate an image using default SillyTavern image-generation modes. Supported mode values: you, face, me, scene, last, raw_last, background. Free text is sent as a custom prompt to the AI.';
         const commandCallback = async (namedArgs, unnamedArg) => {
-            const modeInput = getSlashModeInput(namedArgs, unnamedArg);
-            const mode = modeInput
-                ? parseMode(modeInput)
-                : normalizeMode(getSettings().mode);
-            await generateImage(mode);
+            const namedMode = namedArgs?.mode;
+            const argText = normalizeSlashArg(unnamedArg);
+
+            if (namedMode) {
+                await generateImage(parseMode(namedMode), argText || null);
+            } else if (argText && isKnownModeKeyword(argText)) {
+                await generateImage(parseMode(argText));
+            } else if (argText) {
+                await generateImage(normalizeMode(getSettings().mode), argText);
+            } else {
+                await generateImage(normalizeMode(getSettings().mode));
+            }
             return '';
         };
 
