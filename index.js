@@ -1,6 +1,6 @@
 import { Popper } from '../../../../lib.js';
 import { getContext, extension_settings } from '../../../extensions.js';
-import { generateQuietPrompt, generateRaw } from '../../../../script.js';
+import { generateQuietPrompt } from '../../../../script.js';
 import { eventSource, event_types } from '../../../../script.js';
 import { getRequestHeaders, saveSettingsDebounced } from '../../../../script.js';
 import { saveBase64AsFile } from '../../../utils.js';
@@ -551,11 +551,23 @@ async function generatePromptWithRaw(mode, customPrompt = null) {
     const settings = getSettings();
     const rawPrompt = buildRawPromptInput(mode, customPrompt);
     console.debug(`[IGC] Prompt generation engine=raw contextMode=${settings.raw_context_mode} inputLength=${rawPrompt.length}`);
-    const response = await generateRaw({
-        prompt: rawPrompt,
-        responseLength: settings.raw_response_length,
-        trimNames: true,
-    });
+
+    // Route through ST's full pipeline via setExtensionPrompt + generateQuietPrompt
+    // instead of generateRaw, for aggregator API compatibility.
+    const context = getContext();
+    const INJECT_KEY = 'igc_raw_inject';
+    context.setExtensionPrompt(INJECT_KEY, rawPrompt, 1 /* IN_CHAT */, 0, false, 1 /* USER */);
+    let response;
+    try {
+        response = await generateQuietPrompt({
+            quietPrompt: '',
+            responseLength: settings.raw_response_length,
+            removeReasoning: true,
+        });
+    } finally {
+        context.setExtensionPrompt(INJECT_KEY, '', 1, 0, false, 1);
+    }
+
     const processed = processGeneratedPrompt(response, 'raw');
     console.debug(`[IGC] Prompt generation engine=raw contextMode=${settings.raw_context_mode} outputLength=${processed.length}`);
     return processed;
