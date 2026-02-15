@@ -821,6 +821,22 @@ async function applyGeneratedBackground(imagePath) {
     await eventSource.emit(event_types.FORCE_SET_BACKGROUND, { url: cssUrl, path: normalizedPath });
 }
 
+function injectSetBackgroundButtons() {
+    $('.mes_img_container .mes_img_controls').each(function () {
+        const $controls = $(this);
+        if ($controls.find('.igc_set_background').length > 0) {
+            return;
+        }
+        const $bgButton = $('<div title="Set as Background" class="right_menu_button fa-lg fa-solid fa-panorama igc_set_background"></div>');
+        const $deleteBtn = $controls.find('.mes_media_delete');
+        if ($deleteBtn.length > 0) {
+            $deleteBtn.before($bgButton);
+        } else {
+            $controls.append($bgButton);
+        }
+    });
+}
+
 async function generateImage(overrideMode = null) {
     const settings = getSettings();
     const requestedMode = overrideMode !== null ? overrideMode : settings.mode;
@@ -1285,19 +1301,49 @@ jQuery(async function () {
         }
     }
     tryCreateButton();
+    setTimeout(injectSetBackgroundButtons, 1000);
 
     eventSource.on(event_types.CHAT_CHANGED, function () {
         hideModeDropdown();
         setTimeout(createChatButton, 500);
+        setTimeout(injectSetBackgroundButtons, 500);
     });
 
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, function () {
         setTimeout(createChatButton, 100);
+        setTimeout(injectSetBackgroundButtons, 100);
+    });
+
+    eventSource.on(event_types.USER_MESSAGE_RENDERED, function () {
+        setTimeout(injectSetBackgroundButtons, 100);
     });
 
     eventSource.on(event_types.APP_READY, function () {
         hideModeDropdown();
         registerSlashCommands();
         setTimeout(createChatButton, 500);
+        setTimeout(injectSetBackgroundButtons, 500);
+    });
+
+    $(document).on('click', '.igc_set_background', async function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const $container = $(this).closest('.mes_img_container');
+        const $img = $container.find('img.mes_img');
+        const imageSrc = $img.attr('src');
+
+        if (!imageSrc) {
+            toastr.warning('No image source found.');
+            return;
+        }
+
+        try {
+            await applyGeneratedBackground(imageSrc);
+            toastr.success('Background set successfully!');
+        } catch (error) {
+            console.error('[IGC] Failed to set background:', error);
+            toastr.error('Failed to set background.');
+        }
     });
 });
