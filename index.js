@@ -1010,7 +1010,11 @@ async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
 
     const $baseUploadRow = $('<div class="igc-review-row"></div>');
     const $baseUploadInput = $('<input type="file" accept="image/png,image/jpeg,image/webp" />');
-    $baseUploadRow.append('<label>Base Upload:</label>').append($baseUploadInput);
+    const $baseUploadBtn = $('<button class="menu_button">Choose file</button>');
+    const $baseUploadFilename = $('<span class="igc-upload-filename">No file selected</span>');
+    $baseUploadBtn.on('click', () => $baseUploadInput[0].click());
+    const $baseUploadGroup = $('<div class="igc-upload-group"></div>').append($baseUploadInput, $baseUploadBtn, $baseUploadFilename);
+    $baseUploadRow.append('<label>Base Upload:</label>').append($baseUploadGroup);
     $content.append($baseUploadRow);
 
     const $referenceSourceRow = $('<div class="igc-review-row"></div>');
@@ -1037,7 +1041,11 @@ async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
 
     const $referenceUploadRow = $('<div class="igc-review-row"></div>');
     const $referenceUploadInput = $('<input type="file" accept="image/png,image/jpeg,image/webp" />');
-    $referenceUploadRow.append('<label>Reference Upload:</label>').append($referenceUploadInput);
+    const $referenceUploadBtn = $('<button class="menu_button">Choose file</button>');
+    const $referenceUploadFilename = $('<span class="igc-upload-filename">No file selected</span>');
+    $referenceUploadBtn.on('click', () => $referenceUploadInput[0].click());
+    const $referenceUploadGroup = $('<div class="igc-upload-group"></div>').append($referenceUploadInput, $referenceUploadBtn, $referenceUploadFilename);
+    $referenceUploadRow.append('<label>Reference Upload:</label>').append($referenceUploadGroup);
     $content.append($referenceUploadRow);
 
     const $bgRow = $('<div class="igc-review-row"></div>');
@@ -1109,6 +1117,7 @@ async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
 
     $baseUploadInput.on('change', function () {
         selectedBaseUploadFile = this.files?.[0] || null;
+        $baseUploadFilename.text(selectedBaseUploadFile ? selectedBaseUploadFile.name : 'No file selected');
     });
 
     $referenceSourceSelect.on('change', function () {
@@ -1122,6 +1131,7 @@ async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
 
     $referenceUploadInput.on('change', function () {
         selectedReferenceUploadFile = this.files?.[0] || null;
+        $referenceUploadFilename.text(selectedReferenceUploadFile ? selectedReferenceUploadFile.name : 'No file selected');
     });
 
     updateSourceVisibility();
