@@ -365,11 +365,20 @@ function processReply(str) {
 }
 
 async function callQuietPrompt(quietPrompt) {
+    const context = getContext();
+    // Inject as user-role message instead of system-role quiet prompt.
+    // The quiet prompt mechanism creates a trailing system message which
+    // violates Claude's "conversation must end with user message" constraint.
+    // extension_prompt_types.IN_CHAT = 1, extension_prompt_roles.USER = 1
+    const INJECT_KEY = 'igc_quiet_inject';
+    context.setExtensionPrompt(INJECT_KEY, quietPrompt, 1 /* IN_CHAT */, 0, false, 1 /* USER */);
     try {
-        return await generateQuietPrompt({ quietPrompt });
+        return await generateQuietPrompt({ quietPrompt: '' });
     } catch {
         // Compatibility fallback for older API signatures.
-        return await generateQuietPrompt(quietPrompt, false, false);
+        return await generateQuietPrompt('', false, false);
+    } finally {
+        context.setExtensionPrompt(INJECT_KEY, '', 1, 0, false, 1);
     }
 }
 
