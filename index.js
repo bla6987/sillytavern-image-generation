@@ -57,6 +57,9 @@ const validRawContextModes = new Set(Object.values(rawContextMode));
 
 const backendType = { DEFAULT: 'default', OPENROUTER: 'openrouter' };
 const validBackends = new Set(Object.values(backendType));
+const editSourceType = { NONE: 'none', CHAT: 'chat', UPLOAD: 'upload' };
+const EDIT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const EDIT_ALLOWED_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
 const openRouterAspectRatios = {
     '16:9': 16 / 9,
@@ -325,6 +328,10 @@ function bindUIEvents() {
 
     $('#igc_generate_button').on('click', function () {
         generateImage();
+    });
+
+    $('#igc_edit_button').on('click', function () {
+        editImage();
     });
 }
 
@@ -663,6 +670,604 @@ async function fetchOpenRouterModels(forceRefresh = false) {
     return [];
 }
 
+function normalizeImageMimeType(mimeType) {
+    const normalized = String(mimeType || '').trim().toLowerCase();
+    if (!normalized) {
+        return '';
+    }
+
+    if (normalized === 'image/jpg') {
+        return 'image/jpeg';
+    }
+
+    return normalized;
+}
+
+function inferMimeTypeFromName(name) {
+    const normalized = String(name || '').trim().toLowerCase();
+    if (normalized.endsWith('.png')) {
+        return 'image/png';
+    }
+    if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
+        return 'image/jpeg';
+    }
+    if (normalized.endsWith('.webp')) {
+        return 'image/webp';
+    }
+    return '';
+}
+
+function estimateBase64Size(base64Content) {
+    const normalized = String(base64Content || '').trim();
+    if (!normalized) {
+        return 0;
+    }
+
+    const padding = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0;
+    return Math.max(0, Math.floor((normalized.length * 3) / 4) - padding);
+}
+
+function ensureValidImageMeta({ mimeType, sizeBytes, label }) {
+    const normalizedMimeType = normalizeImageMimeType(mimeType);
+    const prefix = label ? `${label}: ` : '';
+
+    if (!normalizedMimeType) {
+        throw new Error(`${prefix}unable to determine image type.`);
+    }
+
+    if (!EDIT_ALLOWED_MIME_TYPES.has(normalizedMimeType)) {
+        throw new Error(`${prefix}unsupported image type "${normalizedMimeType}". Allowed: PNG, JPEG, WEBP.`);
+    }
+
+    if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+        throw new Error(`${prefix}empty image data.`);
+    }
+
+    if (sizeBytes > EDIT_MAX_IMAGE_BYTES) {
+        throw new Error(`${prefix}image is too large. Max size is ${Math.round(EDIT_MAX_IMAGE_BYTES / (1024 * 1024))}MB.`);
+    }
+}
+
+function validateDataUrlImage(dataUrl, label = 'Image') {
+    const match = /^data:([^;]+);base64,(.+)$/i.exec(String(dataUrl || '').trim());
+    if (!match) {
+        throw new Error(`${label}: invalid data URL image format.`);
+    }
+
+    const mimeType = normalizeImageMimeType(match[1]);
+    const base64Content = match[2];
+    ensureValidImageMeta({
+        mimeType: mimeType,
+        sizeBytes: estimateBase64Size(base64Content),
+        label: label,
+    });
+}
+
+function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Failed to read image data.'));
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function fileToDataUrl(file, label) {
+    if (!(file instanceof File)) {
+        throw new Error(`${label}: no file selected.`);
+    }
+
+    const mimeType = normalizeImageMimeType(file.type) || inferMimeTypeFromName(file.name);
+    ensureValidImageMeta({
+        mimeType: mimeType,
+        sizeBytes: Number(file.size || 0),
+        label: label,
+    });
+
+    const dataUrl = await blobToDataUrl(file);
+    validateDataUrlImage(dataUrl, label);
+    return dataUrl;
+}
+
+function getPathDisplayName(path) {
+    const normalized = String(path || '').trim();
+    if (!normalized) {
+        return 'image';
+    }
+
+    const noQuery = normalized.split('?')[0];
+    const parts = noQuery.split('/');
+    const last = parts[parts.length - 1] || noQuery;
+    try {
+        return decodeURIComponent(last);
+    } catch {
+        return last;
+    }
+}
+
+function normalizeUrlForCompare(url) {
+    const normalized = String(url || '').trim();
+    if (!normalized) {
+        return '';
+    }
+
+    const withoutOrigin = normalized.replace(/^https?:\/\/[^/]+/i, '');
+    try {
+        return decodeURI(withoutOrigin);
+    } catch {
+        return withoutOrigin;
+    }
+}
+
+function collectChatImageCandidates() {
+    const context = getContext();
+    const chat = Array.isArray(context?.chat) ? context.chat : [];
+    const candidates = [];
+    const seen = new Set();
+
+    function addCandidate(url, label = '') {
+        const normalized = String(url || '').trim();
+        if (!normalized) {
+            return;
+        }
+
+        const compareKey = normalizeUrlForCompare(normalized);
+        if (seen.has(compareKey)) {
+            return;
+        }
+        seen.add(compareKey);
+
+        const fallbackLabel = `Chat - ${getPathDisplayName(normalized)}`;
+        candidates.push({
+            value: normalized,
+            text: truncateWithEllipsis(label || fallbackLabel, 100),
+        });
+    }
+
+    for (let i = chat.length - 1; i >= 0; i--) {
+        const message = chat[i];
+        const mediaItems = Array.isArray(message?.extra?.media) ? message.extra.media : [];
+        for (const mediaItem of mediaItems) {
+            if (String(mediaItem?.type || '').toLowerCase() !== 'image') {
+                continue;
+            }
+
+            const url = String(mediaItem?.url || '').trim();
+            if (!url) {
+                continue;
+            }
+
+            const speaker = sanitizeContextText(message?.name ?? message?.original_name, 24);
+            const title = sanitizeContextText(mediaItem?.title, 40);
+            const labelParts = [`#${i + 1}`];
+            if (speaker) {
+                labelParts.push(speaker);
+            }
+            if (title) {
+                labelParts.push(title);
+            } else {
+                labelParts.push(getPathDisplayName(url));
+            }
+            addCandidate(url, labelParts.join(' - '));
+        }
+    }
+
+    $('.mes_img_container img.mes_img').each(function () {
+        const src = String($(this).attr('src') || '').trim();
+        if (!src) {
+            return;
+        }
+
+        addCandidate(src, `Rendered - ${getPathDisplayName(src)}`);
+    });
+
+    return candidates;
+}
+
+function getLatestChatImageUrl() {
+    return collectChatImageCandidates()[0]?.value || '';
+}
+
+async function fetchImageAsDataUrl(imageUrl, label) {
+    const normalized = String(imageUrl || '').trim();
+    if (!normalized) {
+        throw new Error(`${label}: no source image selected.`);
+    }
+
+    if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(normalized)) {
+        validateDataUrlImage(normalized, label);
+        return normalized;
+    }
+
+    const response = await fetch(encodeURI(normalized), { method: 'GET' });
+    if (!response.ok) {
+        throw new Error(`${label}: failed to fetch image (${response.status} ${response.statusText}).`);
+    }
+
+    const blob = await response.blob();
+    const inferredType = normalizeImageMimeType(blob.type) || inferMimeTypeFromName(normalized);
+    ensureValidImageMeta({
+        mimeType: inferredType,
+        sizeBytes: Number(blob.size || 0),
+        label: label,
+    });
+
+    const typedBlob = blob.type ? blob : new Blob([blob], { type: inferredType });
+    const dataUrl = await blobToDataUrl(typedBlob);
+    validateDataUrlImage(dataUrl, label);
+    return dataUrl;
+}
+
+function getDataUrlImageDimensions(dataUrl) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve({
+            width: Number(img.naturalWidth || img.width || 0),
+            height: Number(img.naturalHeight || img.height || 0),
+        });
+        img.onerror = () => reject(new Error('Could not read source image dimensions.'));
+        img.src = dataUrl;
+    });
+}
+
+async function getAspectRatioFromDataUrl(dataUrl) {
+    try {
+        const size = await getDataUrlImageDimensions(dataUrl);
+        if (size.width > 0 && size.height > 0) {
+            return getClosestAspectRatio(size.width, size.height);
+        }
+    } catch (error) {
+        console.warn('[IGC] Failed to infer aspect ratio from source image:', error);
+    }
+
+    return getSDSettingsAspectRatio();
+}
+
+async function resolveSelectedImageDataUrl({
+    sourceType,
+    chatImageUrl,
+    uploadFile,
+    label,
+    allowNone = false,
+}) {
+    if (sourceType === editSourceType.NONE) {
+        if (allowNone) {
+            return '';
+        }
+        throw new Error(`${label}: image source is required.`);
+    }
+
+    if (sourceType === editSourceType.CHAT) {
+        return fetchImageAsDataUrl(chatImageUrl, label);
+    }
+
+    if (sourceType === editSourceType.UPLOAD) {
+        return fileToDataUrl(uploadFile, label);
+    }
+
+    throw new Error(`${label}: unsupported source type "${sourceType}".`);
+}
+
+async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
+    const context = getContext();
+    const popupFn = context?.callGenericPopup;
+    const popupTypeInput = context?.POPUP_TYPE?.INPUT;
+
+    if (typeof popupFn !== 'function' || popupTypeInput === undefined) {
+        throw new Error('Image edit popup is unavailable in this SillyTavern build.');
+    }
+
+    const chatImages = collectChatImageCandidates();
+    const settings = getSettings();
+
+    let selectedModel = settings.openrouter_model || '';
+    let selectedBaseSource = chatImages.length > 0 ? editSourceType.CHAT : editSourceType.UPLOAD;
+    let selectedReferenceSource = editSourceType.NONE;
+    let selectedBaseChatImage = chatImages[0]?.value || '';
+    let selectedReferenceChatImage = '';
+    let selectedBaseUploadFile = null;
+    let selectedReferenceUploadFile = null;
+
+    const preferredCompare = normalizeUrlForCompare(preferredImageUrl);
+    if (preferredCompare) {
+        const preferredCandidate = chatImages.find(x => normalizeUrlForCompare(x.value) === preferredCompare);
+        if (preferredCandidate) {
+            selectedBaseChatImage = preferredCandidate.value;
+        }
+    }
+
+    const alternativeChatCandidate = chatImages.find(x => x.value !== selectedBaseChatImage);
+    selectedReferenceChatImage = alternativeChatCandidate?.value || chatImages[0]?.value || '';
+
+    const $content = $('<div class="igc-review-controls igc-edit-controls"></div>');
+
+    const $modelRow = $('<div class="igc-review-row"></div>');
+    const $modelSelect = $('<select class="igc-review-select igc-model-select"></select>');
+    const $refreshBtn = $('<button class="igc-refresh-btn menu_button" title="Refresh models"><i class="fa-solid fa-arrows-rotate"></i></button>');
+    $modelRow.append('<label>Model:</label>').append($modelSelect).append($refreshBtn);
+    $content.append($modelRow);
+
+    const $baseSourceRow = $('<div class="igc-review-row"></div>');
+    const $baseSourceSelect = $('<select class="igc-review-select"></select>');
+    if (chatImages.length > 0) {
+        $baseSourceSelect.append('<option value="chat">Base image from chat</option>');
+    }
+    $baseSourceSelect.append('<option value="upload">Base image upload</option>');
+    $baseSourceSelect.val(selectedBaseSource);
+    $baseSourceRow.append('<label>Base Image:</label>').append($baseSourceSelect);
+    $content.append($baseSourceRow);
+
+    const $baseChatRow = $('<div class="igc-review-row"></div>');
+    const $baseChatSelect = $('<select class="igc-review-select"></select>');
+    for (const candidate of chatImages) {
+        $baseChatSelect.append($('<option></option>').val(candidate.value).text(candidate.text));
+    }
+    if (selectedBaseChatImage) {
+        $baseChatSelect.val(selectedBaseChatImage);
+    }
+    $baseChatRow.append('<label>Base Chat Image:</label>').append($baseChatSelect);
+    $content.append($baseChatRow);
+
+    const $baseUploadRow = $('<div class="igc-review-row"></div>');
+    const $baseUploadInput = $('<input type="file" accept="image/png,image/jpeg,image/webp" />');
+    $baseUploadRow.append('<label>Base Upload:</label>').append($baseUploadInput);
+    $content.append($baseUploadRow);
+
+    const $referenceSourceRow = $('<div class="igc-review-row"></div>');
+    const $referenceSourceSelect = $('<select class="igc-review-select"></select>');
+    $referenceSourceSelect.append('<option value="none">No reference image</option>');
+    if (chatImages.length > 0) {
+        $referenceSourceSelect.append('<option value="chat">Reference from chat</option>');
+    }
+    $referenceSourceSelect.append('<option value="upload">Reference upload</option>');
+    $referenceSourceSelect.val(selectedReferenceSource);
+    $referenceSourceRow.append('<label>Reference:</label>').append($referenceSourceSelect);
+    $content.append($referenceSourceRow);
+
+    const $referenceChatRow = $('<div class="igc-review-row"></div>');
+    const $referenceChatSelect = $('<select class="igc-review-select"></select>');
+    for (const candidate of chatImages) {
+        $referenceChatSelect.append($('<option></option>').val(candidate.value).text(candidate.text));
+    }
+    if (selectedReferenceChatImage) {
+        $referenceChatSelect.val(selectedReferenceChatImage);
+    }
+    $referenceChatRow.append('<label>Reference Chat:</label>').append($referenceChatSelect);
+    $content.append($referenceChatRow);
+
+    const $referenceUploadRow = $('<div class="igc-review-row"></div>');
+    const $referenceUploadInput = $('<input type="file" accept="image/png,image/jpeg,image/webp" />');
+    $referenceUploadRow.append('<label>Reference Upload:</label>').append($referenceUploadInput);
+    $content.append($referenceUploadRow);
+
+    const $bgRow = $('<div class="igc-review-row"></div>');
+    const $bgCheckbox = $('<input type="checkbox" id="igc_edit_as_background" />');
+    $bgRow.append($bgCheckbox).append('<label for="igc_edit_as_background">As background</label>');
+    $content.append($bgRow);
+
+    const $hint = $('<div class="igc-edit-hint"></div>');
+    if (chatImages.length === 0) {
+        $hint.text('No chat images found. Upload a base image to edit.');
+    } else {
+        $hint.text('Tip: add a second reference image to transfer style or composition hints.');
+    }
+    $content.append($hint);
+
+    function updateSourceVisibility() {
+        $baseChatRow.toggle(selectedBaseSource === editSourceType.CHAT);
+        $baseUploadRow.toggle(selectedBaseSource === editSourceType.UPLOAD);
+        $referenceChatRow.toggle(selectedReferenceSource === editSourceType.CHAT);
+        $referenceUploadRow.toggle(selectedReferenceSource === editSourceType.UPLOAD);
+    }
+
+    async function loadModels(forceRefresh = false) {
+        $modelSelect.empty().append('<option value="">Loading...</option>').prop('disabled', true);
+        $refreshBtn.prop('disabled', true);
+        try {
+            const models = await fetchOpenRouterModels(forceRefresh);
+            $modelSelect.empty();
+
+            if (models.length === 0) {
+                $modelSelect.append('<option value="">No models available</option>');
+            } else {
+                for (const model of models) {
+                    $modelSelect.append($('<option></option>').val(model.value).text(model.text));
+                }
+
+                if (selectedModel && models.some(x => x.value === selectedModel)) {
+                    $modelSelect.val(selectedModel);
+                } else {
+                    selectedModel = models[0].value;
+                    $modelSelect.val(selectedModel);
+                }
+            }
+        } catch (error) {
+            $modelSelect.empty().append('<option value="">Failed to load models</option>');
+            console.error('[IGC] Failed to load OpenRouter models for edit popup:', error);
+        }
+
+        $modelSelect.prop('disabled', false);
+        $refreshBtn.prop('disabled', false);
+    }
+
+    $modelSelect.on('change', function () {
+        selectedModel = String($(this).val() || '');
+    });
+
+    $refreshBtn.on('click', function () {
+        loadModels(true);
+    });
+
+    $baseSourceSelect.on('change', function () {
+        selectedBaseSource = String($(this).val() || editSourceType.UPLOAD);
+        updateSourceVisibility();
+    });
+
+    $baseChatSelect.on('change', function () {
+        selectedBaseChatImage = String($(this).val() || '');
+    });
+
+    $baseUploadInput.on('change', function () {
+        selectedBaseUploadFile = this.files?.[0] || null;
+    });
+
+    $referenceSourceSelect.on('change', function () {
+        selectedReferenceSource = String($(this).val() || editSourceType.NONE);
+        updateSourceVisibility();
+    });
+
+    $referenceChatSelect.on('change', function () {
+        selectedReferenceChatImage = String($(this).val() || '');
+    });
+
+    $referenceUploadInput.on('change', function () {
+        selectedReferenceUploadFile = this.files?.[0] || null;
+    });
+
+    updateSourceVisibility();
+    loadModels();
+
+    const result = await popupFn($content, popupTypeInput, initialPrompt, {
+        rows: 8, okButton: 'Edit Image', cancelButton: 'Cancel', wide: true,
+    });
+
+    if (result === null || result === undefined || result === false) {
+        throw new Error('Edit aborted by user.');
+    }
+
+    selectedModel = String($modelSelect.val() || selectedModel || '').trim();
+    selectedBaseSource = String($baseSourceSelect.val() || selectedBaseSource || editSourceType.UPLOAD);
+    selectedReferenceSource = String($referenceSourceSelect.val() || selectedReferenceSource || editSourceType.NONE);
+    selectedBaseChatImage = String($baseChatSelect.val() || selectedBaseChatImage || '').trim();
+    selectedReferenceChatImage = String($referenceChatSelect.val() || selectedReferenceChatImage || '').trim();
+
+    const editPrompt = String(result || '').trim();
+    if (!editPrompt) {
+        throw new Error('Edit prompt cannot be empty.');
+    }
+
+    if (!selectedModel) {
+        throw new Error('No OpenRouter model selected.');
+    }
+
+    const baseImage = await resolveSelectedImageDataUrl({
+        sourceType: selectedBaseSource,
+        chatImageUrl: selectedBaseChatImage,
+        uploadFile: selectedBaseUploadFile,
+        label: 'Base image',
+    });
+
+    const referenceImage = await resolveSelectedImageDataUrl({
+        sourceType: selectedReferenceSource,
+        chatImageUrl: selectedReferenceChatImage,
+        uploadFile: selectedReferenceUploadFile,
+        label: 'Reference image',
+        allowNone: true,
+    });
+
+    const aspectRatio = await getAspectRatioFromDataUrl(baseImage);
+
+    settings.openrouter_model = selectedModel;
+    settings.backend = backendType.DEFAULT;
+    saveSettings();
+
+    return {
+        prompt: editPrompt,
+        model: selectedModel,
+        image: baseImage,
+        referenceImage: referenceImage,
+        aspectRatio: aspectRatio,
+        asBackground: $bgCheckbox.prop('checked'),
+    };
+}
+
+async function editOpenRouterImage(prompt, model, image, referenceImage, aspectRatio) {
+    if (!secret_state[SECRET_KEYS.OPENROUTER]) {
+        throw new Error('OpenRouter API key not set. Configure it in SillyTavern API settings.');
+    }
+
+    if (!model) {
+        throw new Error('No OpenRouter model selected.');
+    }
+
+    const payload = {
+        model: model,
+        prompt: prompt,
+        image: image,
+        aspect_ratio: aspectRatio || '1:1',
+    };
+
+    if (referenceImage) {
+        payload.reference_image = referenceImage;
+    }
+
+    const result = await fetch('/api/openrouter/image/edit', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify(payload),
+    });
+
+    if (result.ok) {
+        const data = await result.json();
+        return {
+            format: data?.format || 'png',
+            data: data?.image,
+        };
+    }
+
+    const text = await result.text();
+    throw new Error(text);
+}
+
+async function editImage(options = {}) {
+    const opts = typeof options === 'object' && options !== null ? options : {};
+    const preferredImageUrl = String(opts.preferredImageUrl || '').trim();
+    const initialPrompt = String(opts.initialPrompt || '').trim();
+
+    const $button = $('#igc_edit_button');
+    const originalHtml = $button.html();
+    $button.prop('disabled', true).html('<span class="igc-loading"></span> Editing...');
+
+    try {
+        showGenerationIndicator('Preparing image edit...');
+        const editRequest = await showImageEditPopup(initialPrompt, preferredImageUrl);
+
+        showGenerationIndicator('Editing image...');
+        const imageData = await editOpenRouterImage(
+            editRequest.prompt,
+            editRequest.model,
+            editRequest.image,
+            editRequest.referenceImage,
+            editRequest.aspectRatio,
+        );
+
+        updateGenerationIndicator('Saving image...');
+        const savedImagePath = await saveAndDisplayImage(imageData, editRequest.prompt);
+
+        if (editRequest.asBackground) {
+            try {
+                await applyGeneratedBackground(savedImagePath);
+                toastr.success('Image edited and set as background!');
+            } catch (error) {
+                console.warn('[IGC] Failed to auto-apply edited image as background:', error);
+                toastr.warning('Image edited, but setting background failed.');
+            }
+        } else {
+            toastr.success('Image edited successfully!');
+        }
+    } catch (error) {
+        const message = String(error?.message || 'Unknown error');
+        if (/aborted by user|canceled|cancelled/i.test(message)) {
+            toastr.warning('Image edit canceled.');
+        } else {
+            toastr.error(`Image edit failed: ${message}`);
+        }
+    } finally {
+        hideGenerationIndicator();
+        $button.prop('disabled', false).html(originalHtml);
+    }
+}
+
 async function showReviewPopup(prompt) {
     const context = getContext();
     const popupFn = context?.callGenericPopup;
@@ -878,18 +1483,27 @@ async function applyGeneratedBackground(imagePath) {
     await eventSource.emit(event_types.FORCE_SET_BACKGROUND, { url: cssUrl, path: normalizedPath });
 }
 
-function injectSetBackgroundButtons() {
+function injectImageActionButtons() {
     $('.mes_img_container .mes_img_controls').each(function () {
         const $controls = $(this);
-        if ($controls.find('.igc_set_background').length > 0) {
-            return;
-        }
-        const $bgButton = $('<div title="Set as Background" class="right_menu_button fa-lg fa-solid fa-panorama igc_set_background"></div>');
         const $deleteBtn = $controls.find('.mes_media_delete');
-        if ($deleteBtn.length > 0) {
-            $deleteBtn.before($bgButton);
-        } else {
-            $controls.append($bgButton);
+
+        if ($controls.find('.igc_edit_image').length === 0) {
+            const $editButton = $('<div title="Reimagine / Edit Image" class="right_menu_button fa-lg fa-solid fa-pen-to-square igc_edit_image"></div>');
+            if ($deleteBtn.length > 0) {
+                $deleteBtn.before($editButton);
+            } else {
+                $controls.append($editButton);
+            }
+        }
+
+        if ($controls.find('.igc_set_background').length === 0) {
+            const $bgButton = $('<div title="Set as Background" class="right_menu_button fa-lg fa-solid fa-panorama igc_set_background"></div>');
+            if ($deleteBtn.length > 0) {
+                $deleteBtn.before($bgButton);
+            } else {
+                $controls.append($bgButton);
+            }
         }
     });
 }
@@ -1006,11 +1620,23 @@ function ensureModeDropdown() {
         $list.append($item);
     }
 
+    const $editItem = $('<li></li>')
+        .addClass('list-group-item igc-dropdown-item igc-dropdown-edit-item')
+        .attr('data-action', 'edit')
+        .text('Reimagine / Edit an image');
+    $list.append($editItem);
+
     $dropdown.append($list).hide();
     $dropdown.on('click', '.igc-dropdown-item', function (e) {
         e.preventDefault();
         e.stopPropagation();
         hideModeDropdown();
+        const action = String($(this).attr('data-action') || '');
+        if (action === 'edit') {
+            editImage({ preferredImageUrl: getLatestChatImageUrl() });
+            return;
+        }
+
         const selectedMode = Number($(this).attr('data-mode'));
         generateImage(selectedMode);
     });
@@ -1207,6 +1833,13 @@ function showModePopup(x, y) {
         $popup.append($item);
     }
 
+    const $editItem = $('<div class="igc-mode-popup-item igc-dropdown-edit-item">Reimagine / Edit an image</div>');
+    $editItem.on('click', function () {
+        editImage({ preferredImageUrl: getLatestChatImageUrl() });
+        $popup.remove();
+    });
+    $popup.append($editItem);
+
     $popup.css({
         left: `${x}px`,
         top: `${y - $popup.outerHeight() - 10}px`,
@@ -1256,6 +1889,31 @@ function normalizeSlashArg(unnamedArgs) {
     return String(unnamedArgs).trim();
 }
 
+function parseSlashBoolean(value) {
+    if (typeof value === 'boolean') {
+        return value;
+    }
+
+    if (value === undefined || value === null) {
+        return false;
+    }
+
+    const normalized = String(value).trim().toLowerCase();
+    if (!normalized) {
+        return true;
+    }
+
+    if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) {
+        return true;
+    }
+
+    if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) {
+        return false;
+    }
+
+    return true;
+}
+
 function registerSlashCommands() {
     if (slashCommandsRegistered) {
         return;
@@ -1272,10 +1930,33 @@ function registerSlashCommands() {
             registerSlashCommand,
         } = context;
 
-        const commandHelp = 'Generate an image using default SillyTavern image-generation modes. Supported mode values: you, face, me, scene, last, raw_last, background. Free text is sent as a custom prompt to the AI.';
+        const commandHelp = 'Generate or edit images. Use --mode for generation modes (you, face, me, scene, last, raw_last, background). Use --edit to open reimagine/edit flow with the latest chat image preselected.';
         const commandCallback = async (namedArgs, unnamedArg) => {
             const namedMode = namedArgs?.mode;
+            const namedEdit = namedArgs?.edit;
             const argText = normalizeSlashArg(unnamedArg);
+
+            let shouldEdit = parseSlashBoolean(namedEdit);
+            let editPrompt = argText;
+
+            if (!shouldEdit && argText) {
+                const lower = argText.toLowerCase();
+                if (lower === 'edit') {
+                    shouldEdit = true;
+                    editPrompt = '';
+                } else if (lower.startsWith('edit ')) {
+                    shouldEdit = true;
+                    editPrompt = argText.slice(5).trim();
+                }
+            }
+
+            if (shouldEdit) {
+                await editImage({
+                    preferredImageUrl: getLatestChatImageUrl(),
+                    initialPrompt: editPrompt,
+                });
+                return '';
+            }
 
             if (namedMode) {
                 await generateImage(parseMode(namedMode), argText || null);
@@ -1303,6 +1984,12 @@ function registerSlashCommands() {
                         name: 'mode',
                         description: `Generation mode: ${getModeEnumList().join(', ')}`,
                         typeList: [ARGUMENT_TYPE.STRING],
+                    }),
+                    SlashCommandNamedArgument.fromProps({
+                        name: 'edit',
+                        description: 'Set true to edit/reimagine the latest chat image.',
+                        typeList: [ARGUMENT_TYPE.STRING],
+                        isRequired: false,
                     }),
                 ];
             }
@@ -1358,28 +2045,44 @@ jQuery(async function () {
         }
     }
     tryCreateButton();
-    setTimeout(injectSetBackgroundButtons, 1000);
+    setTimeout(injectImageActionButtons, 1000);
 
     eventSource.on(event_types.CHAT_CHANGED, function () {
         hideModeDropdown();
         setTimeout(createChatButton, 500);
-        setTimeout(injectSetBackgroundButtons, 500);
+        setTimeout(injectImageActionButtons, 500);
     });
 
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, function () {
         setTimeout(createChatButton, 100);
-        setTimeout(injectSetBackgroundButtons, 100);
+        setTimeout(injectImageActionButtons, 100);
     });
 
     eventSource.on(event_types.USER_MESSAGE_RENDERED, function () {
-        setTimeout(injectSetBackgroundButtons, 100);
+        setTimeout(injectImageActionButtons, 100);
     });
 
     eventSource.on(event_types.APP_READY, function () {
         hideModeDropdown();
         registerSlashCommands();
         setTimeout(createChatButton, 500);
-        setTimeout(injectSetBackgroundButtons, 500);
+        setTimeout(injectImageActionButtons, 500);
+    });
+
+    $(document).on('click', '.igc_edit_image', async function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const $container = $(this).closest('.mes_img_container');
+        const $img = $container.find('img.mes_img');
+        const imageSrc = String($img.attr('src') || '').trim();
+
+        if (!imageSrc) {
+            toastr.warning('No image source found.');
+            return;
+        }
+
+        await editImage({ preferredImageUrl: imageSrc });
     });
 
     $(document).on('click', '.igc_set_background', async function (e) {

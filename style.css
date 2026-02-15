@@ -137,6 +137,10 @@
     cursor: pointer;
 }
 
+#igc_edit_button {
+    margin-left: 8px;
+}
+
 /* Anlas display */
 .igc-anlas-display {
     font-size: 0.9em;
@@ -207,8 +211,26 @@
     pointer-events: none;
 }
 
+.igc-edit-controls input[type="file"] {
+    flex: 1;
+    min-width: 0;
+}
+
+.igc-edit-hint {
+    font-size: 0.9em;
+    opacity: 0.85;
+}
+
+.igc-dropdown-edit-item {
+    font-weight: 600;
+}
+
 /* Set as Background button in image controls */
 .igc_set_background {
+    cursor: pointer;
+}
+
+.igc_edit_image {
     cursor: pointer;
 }
 
