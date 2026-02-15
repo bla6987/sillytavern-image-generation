@@ -815,7 +815,7 @@ async function saveAndDisplayImage(imageData, prompt) {
     const message = {
         name: characterName,
         is_user: false,
-        is_system: false,
+        is_system: true,
         send_date: getMessageTimeStamp(),
         mes: prompt,
         extra: {
