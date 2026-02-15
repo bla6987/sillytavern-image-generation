@@ -14,6 +14,7 @@ const modeDropdownButtonSelector = '#image_gen_clone_button';
 let slashCommandsRegistered = false;
 let modeDropdownPopper = null;
 let modeDropdownCloseHandlerBound = false;
+let generationToast = null;
 
 // Match ST default visible generation modes.
 const generationMode = {
@@ -614,6 +615,34 @@ function buildFinalPrompt(generatedPrompt) {
     return parts.join(', ');
 }
 
+function showGenerationIndicator(text) {
+    const toastText = `<i class="fa-solid fa-spinner fa-spin"></i> ${text}`;
+    if (!generationToast) {
+        generationToast = toastr.info(toastText, 'Image Generation', {
+            timeOut: 0,
+            extendedTimeOut: 0,
+            tapToDismiss: false,
+            escapeHtml: false,
+        });
+    } else {
+        $(generationToast).find('.toast-message').html(toastText);
+    }
+}
+
+function updateGenerationIndicator(text) {
+    if (generationToast) {
+        const toastText = `<i class="fa-solid fa-spinner fa-spin"></i> ${text}`;
+        $(generationToast).find('.toast-message').html(toastText);
+    }
+}
+
+function hideGenerationIndicator() {
+    if (generationToast) {
+        toastr.clear(generationToast);
+        generationToast = null;
+    }
+}
+
 let cachedOpenRouterModels = null;
 
 async function fetchOpenRouterModels(forceRefresh = false) {
@@ -875,15 +904,20 @@ async function generateImage(overrideMode = null, customPrompt = null) {
     $button.prop('disabled', true).html('<span class="igc-loading"></span> Generating...');
 
     try {
+        showGenerationIndicator('Generating prompt\u2026');
         const generatedPrompt = await generatePromptWithLLM(mode, customPrompt);
         const finalPrompt = buildFinalPrompt(generatedPrompt);
+        hideGenerationIndicator();
         const reviewResult = await showReviewPopup(finalPrompt);
 
         const applyAsBackground = mode === generationMode.BACKGROUND || reviewResult.asBackground;
 
+        showGenerationIndicator('Generating image\u2026');
+
         if (reviewResult.backend === backendType.OPENROUTER) {
             const aspectRatio = getSDSettingsAspectRatio();
             const imageData = await generateOpenRouterImage(reviewResult.prompt, reviewResult.model, aspectRatio);
+            updateGenerationIndicator('Saving image\u2026');
             const savedImagePath = await saveAndDisplayImage(imageData, reviewResult.prompt);
 
             if (applyAsBackground) {
@@ -927,6 +961,7 @@ async function generateImage(overrideMode = null, customPrompt = null) {
             toastr.error(`Generation failed: ${message}`);
         }
     } finally {
+        hideGenerationIndicator();
         $button.prop('disabled', false).html(originalHtml);
     }
 }
