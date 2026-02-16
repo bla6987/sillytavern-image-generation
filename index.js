@@ -109,6 +109,7 @@ const defaultSettings = {
     raw_response_length: 220,
     backend: backendType.DEFAULT,
     openrouter_model: '',
+    openrouter_api_key: '',
 };
 
 // Exact ST default templates for visible modes.
@@ -262,6 +263,11 @@ function loadSettings() {
         changed = true;
     }
 
+    if (typeof settings.openrouter_api_key !== 'string') {
+        settings.openrouter_api_key = defaultSettings.openrouter_api_key;
+        changed = true;
+    }
+
     if (changed) {
         saveSettingsDebounced();
     }
@@ -283,6 +289,7 @@ function updateUIFromSettings() {
     $('#igc_raw_context_messages').val(settings.raw_context_messages);
     $('#igc_raw_context_chars_per_message').val(settings.raw_context_chars_per_message);
     $('#igc_raw_response_length').val(settings.raw_response_length);
+    $('#igc_openrouter_api_key').val(settings.openrouter_api_key);
     updateRawContextSettingsVisibility();
 }
 
@@ -323,6 +330,11 @@ function bindUIEvents() {
     $('#igc_raw_response_length').on('change', function () {
         getSettings().raw_response_length = clampNumber($(this).val(), defaultSettings.raw_response_length, 64, 512);
         $(this).val(getSettings().raw_response_length);
+        saveSettings();
+    });
+
+    $('#igc_openrouter_api_key').on('change', function () {
+        getSettings().openrouter_api_key = String($(this).val() || '');
         saveSettings();
     });
 
@@ -1191,42 +1203,95 @@ async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
     };
 }
 
+async function resolveImagePayload(imageUrl) {
+    const url = String(imageUrl || '').trim();
+    if (!url) {
+        throw new Error('Empty image URL in response.');
+    }
+
+    if (/^data:image\/([a-z0-9.+-]+);base64,/i.test(url)) {
+        const match = /^data:image\/([a-z0-9.+-]+);base64,(.+)$/i.exec(url);
+        if (!match) {
+            throw new Error('Malformed data URL in response.');
+        }
+        let format = match[1].toLowerCase();
+        if (format === 'jpeg') {
+            format = 'jpg';
+        }
+        return { format, data: match[2] };
+    }
+
+    if (/^https?:\/\//i.test(url)) {
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Failed to fetch image from URL: ${response.status} ${response.statusText}`);
+        }
+        const blob = await response.blob();
+        const dataUrl = await blobToDataUrl(blob);
+        return resolveImagePayload(dataUrl);
+    }
+
+    return { format: 'png', data: url };
+}
+
 async function editOpenRouterImage(prompt, model, image, referenceImage, aspectRatio) {
-    if (!secret_state[SECRET_KEYS.OPENROUTER]) {
-        throw new Error('OpenRouter API key not set. Configure it in SillyTavern API settings.');
+    const apiKey = String(getSettings().openrouter_api_key || '').trim();
+    if (!apiKey) {
+        throw new Error('OpenRouter API key not set. Configure it in the Image Generation Clone extension settings.');
     }
 
     if (!model) {
         throw new Error('No OpenRouter model selected.');
     }
 
-    const payload = {
-        model: model,
-        prompt: prompt,
-        image: image,
-        aspect_ratio: aspectRatio || '1:1',
-    };
+    const contentParts = [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: image } },
+    ];
 
     if (referenceImage) {
-        payload.reference_image = referenceImage;
+        contentParts.push({ type: 'image_url', image_url: { url: referenceImage } });
     }
 
-    const result = await fetch('/api/openrouter/image/edit', {
+    const result = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify(payload),
+        headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://sillytavern.app',
+            'X-Title': 'SillyTavern',
+        },
+        body: JSON.stringify({
+            model: model,
+            modalities: ['image', 'text'],
+            image_config: {
+                aspect_ratio: aspectRatio || '1:1',
+            },
+            messages: [{
+                role: 'user',
+                content: contentParts,
+            }],
+        }),
     });
 
-    if (result.ok) {
-        const data = await result.json();
-        return {
-            format: data?.format || 'png',
-            data: data?.image,
-        };
+    if (!result.ok) {
+        let errorMessage;
+        try {
+            const errorData = await result.json();
+            errorMessage = errorData?.error?.message || JSON.stringify(errorData);
+        } catch {
+            errorMessage = await result.text();
+        }
+        throw new Error(`OpenRouter API error (${result.status}): ${errorMessage}`);
     }
 
-    const text = await result.text();
-    throw new Error(text);
+    const data = await result.json();
+    const imageUrl = data?.choices?.[0]?.message?.images?.[0]?.image_url?.url;
+    if (!imageUrl) {
+        throw new Error('No image returned in OpenRouter response.');
+    }
+
+    return resolveImagePayload(imageUrl);
 }
 
 async function editImage(options = {}) {
