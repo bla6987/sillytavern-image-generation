@@ -15,6 +15,7 @@ let slashCommandsRegistered = false;
 let modeDropdownPopper = null;
 let modeDropdownCloseHandlerBound = false;
 let generationToast = null;
+let activeToastCount = 0;
 
 // Match ST default visible generation modes.
 const generationMode = {
@@ -635,6 +636,7 @@ function buildFinalPrompt(generatedPrompt) {
 }
 
 function showGenerationIndicator(text) {
+    activeToastCount++;
     const toastText = `<i class="fa-solid fa-spinner fa-spin"></i> ${text}`;
     if (!generationToast) {
         generationToast = toastr.info(toastText, 'Image Generation', {
@@ -656,7 +658,8 @@ function updateGenerationIndicator(text) {
 }
 
 function hideGenerationIndicator() {
-    if (generationToast) {
+    activeToastCount = Math.max(0, activeToastCount - 1);
+    if (activeToastCount === 0 && generationToast) {
         toastr.clear(generationToast);
         generationToast = null;
     }
@@ -689,21 +692,27 @@ async function fetchOpenRouterEditModels(forceRefresh = false) {
         return cachedOpenRouterEditModels;
     }
 
-    const result = await fetch('https://openrouter.ai/api/v1/models');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    try {
+        const result = await fetch('https://openrouter.ai/api/v1/models', { signal: controller.signal });
 
-    if (result.ok) {
-        const data = await result.json();
-        cachedOpenRouterEditModels = (data.data || [])
-            .filter(m =>
-                m.architecture?.input_modalities?.includes('image') &&
-                m.architecture?.output_modalities?.includes('image'),
-            )
-            .map(m => ({ value: m.id, text: m.name || m.id }))
-            .sort((a, b) => a.value.localeCompare(b.value));
-        return cachedOpenRouterEditModels;
+        if (result.ok) {
+            const data = await result.json();
+            cachedOpenRouterEditModels = (data.data || [])
+                .filter(m =>
+                    m.architecture?.input_modalities?.includes('image') &&
+                    m.architecture?.output_modalities?.includes('image'),
+                )
+                .map(m => ({ value: m.id, text: m.name || m.id }))
+                .sort((a, b) => a.value.localeCompare(b.value));
+            return cachedOpenRouterEditModels;
+        }
+
+        return [];
+    } finally {
+        clearTimeout(timeoutId);
     }
-
-    return [];
 }
 
 function normalizeImageMimeType(mimeType) {
@@ -1104,7 +1113,10 @@ async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
         $referenceUploadRow.toggle(selectedReferenceSource === editSourceType.UPLOAD);
     }
 
+    let isLoadingModels = false;
     async function loadModels(forceRefresh = false) {
+        if (isLoadingModels) return;
+        isLoadingModels = true;
         $modelSelect.empty().append('<option value="">Loading...</option>').prop('disabled', true);
         $refreshBtn.prop('disabled', true);
         try {
@@ -1128,6 +1140,8 @@ async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
         } catch (error) {
             $modelSelect.empty().append('<option value="">Failed to load models</option>');
             console.error('[IGC] Failed to load OpenRouter models for edit popup:', error);
+        } finally {
+            isLoadingModels = false;
         }
 
         $modelSelect.prop('disabled', false);
@@ -1414,7 +1428,10 @@ async function showReviewPopup(prompt) {
     }
     updateORVisibility();
 
+    let isLoadingModels = false;
     async function loadModels(forceRefresh = false) {
+        if (isLoadingModels) return;
+        isLoadingModels = true;
         $modelSelect.empty().append('<option value="">Loading...</option>').prop('disabled', true);
         $refreshBtn.prop('disabled', true);
         try {
@@ -1424,7 +1441,7 @@ async function showReviewPopup(prompt) {
                 $modelSelect.append('<option value="">No models available</option>');
             } else {
                 for (const model of models) {
-                    $modelSelect.append(`<option value="${model.value}">${model.text}</option>`);
+                    $modelSelect.append($('<option></option>').val(model.value).text(model.text));
                 }
                 if (selectedModel && models.some(m => m.value === selectedModel)) {
                     $modelSelect.val(selectedModel);
@@ -1436,6 +1453,8 @@ async function showReviewPopup(prompt) {
         } catch (e) {
             $modelSelect.empty().append('<option value="">Failed to load models</option>');
             console.error('[IGC] Failed to load OpenRouter models:', e);
+        } finally {
+            isLoadingModels = false;
         }
         $modelSelect.prop('disabled', false);
         $refreshBtn.prop('disabled', false);
@@ -1503,7 +1522,10 @@ async function generateOpenRouterImage(prompt, model, aspectRatio) {
 
     if (result.ok) {
         const data = await result.json();
-        return { format: 'jpg', data: data.image };
+        if (!data.image) {
+            throw new Error('No image returned in OpenRouter response.');
+        }
+        return resolveImagePayload(data.image);
     }
 
     const text = await result.text();
@@ -2172,32 +2194,37 @@ jQuery(async function () {
         e.preventDefault();
         e.stopPropagation();
 
-        const $container = $(this).closest('.mes_img_container');
-        const $img = $container.find('img.mes_img');
-        const imageSrc = String($img.attr('src') || '').trim();
+        try {
+            const $container = $(this).closest('.mes_img_container');
+            const $img = $container.find('img.mes_img');
+            const imageSrc = String($img.attr('src') || '').trim();
 
-        if (!imageSrc) {
-            toastr.warning('No image source found.');
-            return;
+            if (!imageSrc) {
+                toastr.warning('No image source found.');
+                return;
+            }
+
+            await editImage({ preferredImageUrl: imageSrc });
+        } catch (error) {
+            console.error('[IGC] Error in edit image handler:', error);
+            toastr.error('Failed to start image edit.');
         }
-
-        await editImage({ preferredImageUrl: imageSrc });
     });
 
     $(document).on('click', '.igc_set_background', async function (e) {
         e.preventDefault();
         e.stopPropagation();
 
-        const $container = $(this).closest('.mes_img_container');
-        const $img = $container.find('img.mes_img');
-        const imageSrc = $img.attr('src');
-
-        if (!imageSrc) {
-            toastr.warning('No image source found.');
-            return;
-        }
-
         try {
+            const $container = $(this).closest('.mes_img_container');
+            const $img = $container.find('img.mes_img');
+            const imageSrc = $img.attr('src');
+
+            if (!imageSrc) {
+                toastr.warning('No image source found.');
+                return;
+            }
+
             await applyGeneratedBackground(imageSrc);
             toastr.success('Background set successfully!');
         } catch (error) {
