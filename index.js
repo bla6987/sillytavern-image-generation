@@ -112,6 +112,7 @@ const defaultSettings = {
     openrouter_model: '',
     openrouter_api_key: '',
     descriptive_prompt: false,
+    descriptive_custom_prompt: false,
     descriptive_template_overrides: {},
 };
 
@@ -286,6 +287,11 @@ function loadSettings() {
         changed = true;
     }
 
+    if (typeof settings.descriptive_custom_prompt !== 'boolean') {
+        settings.descriptive_custom_prompt = defaultSettings.descriptive_custom_prompt;
+        changed = true;
+    }
+
     if (typeof settings.descriptive_template_overrides !== 'object' || settings.descriptive_template_overrides === null || Array.isArray(settings.descriptive_template_overrides)) {
         settings.descriptive_template_overrides = {};
         changed = true;
@@ -334,6 +340,7 @@ function updateUIFromSettings() {
     $('#igc_raw_response_length').val(settings.raw_response_length);
     $('#igc_openrouter_api_key').val(settings.openrouter_api_key);
     $('#igc_descriptive_prompt').prop('checked', settings.descriptive_prompt);
+    $('#igc_descriptive_custom_prompt').prop('checked', settings.descriptive_custom_prompt);
     $('#igc_descriptive_template_section').toggleClass('igc-hidden', !settings.descriptive_prompt);
     updateDescriptiveTemplateEditor();
     updateRawContextSettingsVisibility();
@@ -388,6 +395,11 @@ function bindUIEvents() {
         getSettings().descriptive_prompt = $(this).prop('checked');
         $('#igc_descriptive_template_section').toggleClass('igc-hidden', !getSettings().descriptive_prompt);
         updateDescriptiveTemplateEditor();
+        saveSettings();
+    });
+
+    $('#igc_descriptive_custom_prompt').on('change', function () {
+        getSettings().descriptive_custom_prompt = $(this).prop('checked');
         saveSettings();
     });
 
@@ -659,9 +671,18 @@ function buildContextBlock(rawContextModeSetting, settings) {
     return `${header}\n${entries.join('\n')}`;
 }
 
+function resolvePromptTemplate(mode, customPrompt = null) {
+    const settings = getSettings();
+    if (customPrompt && settings.descriptive_prompt && settings.descriptive_custom_prompt) {
+        const descriptiveTemplate = processTemplate(getTemplateByMode(mode, true));
+        return `${descriptiveTemplate}\n\nThe user has specifically requested the following subject matter: ${processTemplate(customPrompt)}`;
+    }
+    return customPrompt ? processTemplate(customPrompt) : processTemplate(getTemplateByMode(mode, settings.descriptive_prompt));
+}
+
 function buildRawPromptInput(mode, customPrompt = null) {
     const settings = getSettings();
-    const template = customPrompt ? processTemplate(customPrompt) : processTemplate(getTemplateByMode(mode, settings.descriptive_prompt));
+    const template = resolvePromptTemplate(mode, customPrompt);
     const normalizedContextMode = normalizeRawContextMode(settings.raw_context_mode);
     const contextBlock = buildContextBlock(normalizedContextMode, settings);
 
@@ -684,8 +705,7 @@ function processGeneratedPrompt(rawResponse, source) {
 }
 
 async function generatePromptWithQuiet(mode, customPrompt = null) {
-    const settings = getSettings();
-    const quietPrompt = customPrompt ? processTemplate(customPrompt) : processTemplate(getTemplateByMode(mode, settings.descriptive_prompt));
+    const quietPrompt = resolvePromptTemplate(mode, customPrompt);
     console.debug(`[IGC] Prompt generation engine=quiet inputLength=${quietPrompt.length}`);
     const response = await callQuietPrompt(quietPrompt);
     const processed = processGeneratedPrompt(response, 'quiet');
