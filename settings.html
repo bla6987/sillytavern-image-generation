@@ -27,6 +27,34 @@
                 <textarea id="igc_prefix" placeholder="best quality, absurdres, aesthetic,"></textarea>
             </div>
 
+            <div class="igc-settings-row igc-checkbox-row">
+                <input type="checkbox" id="igc_descriptive_prompt">
+                <label for="igc_descriptive_prompt">Descriptive prompt (natural language for DALL-E, Flux, etc.)</label>
+            </div>
+
+            <div id="igc_descriptive_template_section" class="igc-hidden">
+                <div class="igc-settings-row">
+                    <label for="igc_descriptive_template_mode">Edit Template For:</label>
+                    <select id="igc_descriptive_template_mode">
+                        <option value="0">Yourself</option>
+                        <option value="5">Your Face</option>
+                        <option value="1">Me</option>
+                        <option value="2">The Whole Story</option>
+                        <option value="4">The Last Message</option>
+                        <option value="7">Background</option>
+                    </select>
+                </div>
+                <div class="igc-settings-row igc-textarea-row">
+                    <label for="igc_descriptive_template_text">Template:</label>
+                    <textarea id="igc_descriptive_template_text" rows="6" placeholder="Using built-in default..."></textarea>
+                </div>
+                <div class="igc-settings-row">
+                    <button id="igc_descriptive_template_reset" class="menu_button">
+                        <i class="fa-solid fa-rotate-left"></i> Reset to Default
+                    </button>
+                </div>
+            </div>
+
             <div class="igc-settings-row">
                 <label for="igc_prompt_engine_mode">Prompt Engine:</label>
                 <select id="igc_prompt_engine_mode">

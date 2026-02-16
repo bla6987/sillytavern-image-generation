@@ -111,6 +111,8 @@ const defaultSettings = {
     backend: backendType.DEFAULT,
     openrouter_model: '',
     openrouter_api_key: '',
+    descriptive_prompt: false,
+    descriptive_template_overrides: {},
 };
 
 // Exact ST default templates for visible modes.
@@ -144,6 +146,16 @@ const promptTemplates = {
     '(location),(character list by gender),(primary action), (relative character position) POV, (character 1's description and actions), (character 2's description and actions)'`,
     [generationMode.RAW_LAST]: 'Ignore previous instructions and provide ONLY the last chat message string back to me verbatim. Do not write anything after the string. Do not reply as {{char}} when writing this description, and do not attempt to continue the story.',
     [generationMode.BACKGROUND]: 'Ignore previous instructions and provide a detailed description of {{char}}\'s surroundings in the form of a comma-delimited list of keywords and phrases. The list must include all of the following items in this order: location, time of day, weather, lighting, and any other relevant details. Do not include descriptions of characters and non-visual qualities such as names, personality, movements, scents, mental traits, or anything which could not be seen in a still photograph. Do not write in full sentences. Prefix your description with the phrase \'background,\'. Ignore the rest of the story when crafting this description. Do not reply as {{char}} when writing this description, and do not attempt to continue the story.',
+};
+
+const descriptivePromptTemplates = {
+    [generationMode.CHARACTER]: 'Write a single vivid paragraph describing {{char}}\'s complete visual appearance as if commissioning a full body portrait. Include species or race, gender, age, build, skin, hair, eyes, facial features, expression, clothing, accessories, posture, and distinguishing marks. Describe composition and framing. Write in flowing natural language, not as a list of keywords. Do not use quotation marks or markdown formatting.',
+    [generationMode.FACE]: 'Write a single vivid paragraph describing {{char}}\'s face and upper body as if commissioning a close-up portrait. Focus on facial structure, skin texture, eyes, expression, and hair as it frames the face. Include portrait lighting and mood. Write in flowing natural language, not as a list of keywords. Do not use quotation marks or markdown formatting.',
+    [generationMode.USER]: 'Write a single vivid paragraph describing {{user}}\'s complete visual appearance from {{char}}\'s perspective, as if commissioning a full body portrait. Include species or race, gender, age, build, skin, hair, eyes, facial features, expression, clothing, accessories, posture, and distinguishing marks. Describe composition and framing. Write in flowing natural language, not as a list of keywords. Do not use quotation marks or markdown formatting.',
+    [generationMode.SCENARIO]: 'Write a single vivid paragraph describing the current scene as a rich visual illustration. Include what is happening, each character\'s appearance, the surroundings, atmosphere, lighting, and color palette. Write in flowing natural language, not as a list of keywords. Do not use quotation marks or markdown formatting.',
+    [generationMode.NOW]: 'Translate the last chat message into a single vivid paragraph describing the visual scene. Reference characters by their physical description rather than names. Include the setting, poses, spatial relationships, action, and expressions. Write in flowing natural language, not as a list of keywords. Do not use quotation marks or markdown formatting.',
+    [generationMode.RAW_LAST]: promptTemplates[generationMode.RAW_LAST],
+    [generationMode.BACKGROUND]: 'Write a single vivid paragraph describing an atmospheric environment illustration of {{char}}\'s surroundings. Include the location, architectural or natural features, time of day, weather, lighting, color palette, ambient details, and atmospheric effects. Do not include any characters. Write in flowing natural language, not as a list of keywords. Do not use quotation marks or markdown formatting.',
 };
 
 const modeDisplayNames = {
@@ -269,6 +281,24 @@ function loadSettings() {
         changed = true;
     }
 
+    if (typeof settings.descriptive_prompt !== 'boolean') {
+        settings.descriptive_prompt = defaultSettings.descriptive_prompt;
+        changed = true;
+    }
+
+    if (typeof settings.descriptive_template_overrides !== 'object' || settings.descriptive_template_overrides === null || Array.isArray(settings.descriptive_template_overrides)) {
+        settings.descriptive_template_overrides = {};
+        changed = true;
+    } else {
+        const validKeys = new Set(orderedModes.map(String));
+        for (const key of Object.keys(settings.descriptive_template_overrides)) {
+            if (!validKeys.has(key)) {
+                delete settings.descriptive_template_overrides[key];
+                changed = true;
+            }
+        }
+    }
+
     if (changed) {
         saveSettingsDebounced();
     }
@@ -281,6 +311,18 @@ function updateRawContextSettingsVisibility() {
     $('#igc_raw_context_chars_row').toggleClass('igc-hidden', !showContextLimits);
 }
 
+function updateDescriptiveTemplateEditor() {
+    const settings = getSettings();
+    const mode = String($('#igc_descriptive_template_mode').val() || generationMode.CHARACTER);
+    const override = settings.descriptive_template_overrides?.[mode];
+    if (typeof override === 'string' && override.trim()) {
+        $('#igc_descriptive_template_text').val(override);
+    } else {
+        const builtIn = descriptivePromptTemplates[Number(mode)] || '';
+        $('#igc_descriptive_template_text').val(builtIn);
+    }
+}
+
 function updateUIFromSettings() {
     const settings = getSettings();
     $('#igc_mode').val(settings.mode);
@@ -291,6 +333,9 @@ function updateUIFromSettings() {
     $('#igc_raw_context_chars_per_message').val(settings.raw_context_chars_per_message);
     $('#igc_raw_response_length').val(settings.raw_response_length);
     $('#igc_openrouter_api_key').val(settings.openrouter_api_key);
+    $('#igc_descriptive_prompt').prop('checked', settings.descriptive_prompt);
+    $('#igc_descriptive_template_section').toggleClass('igc-hidden', !settings.descriptive_prompt);
+    updateDescriptiveTemplateEditor();
     updateRawContextSettingsVisibility();
 }
 
@@ -336,6 +381,37 @@ function bindUIEvents() {
 
     $('#igc_openrouter_api_key').on('change', function () {
         getSettings().openrouter_api_key = String($(this).val() || '');
+        saveSettings();
+    });
+
+    $('#igc_descriptive_prompt').on('change', function () {
+        getSettings().descriptive_prompt = $(this).prop('checked');
+        $('#igc_descriptive_template_section').toggleClass('igc-hidden', !getSettings().descriptive_prompt);
+        updateDescriptiveTemplateEditor();
+        saveSettings();
+    });
+
+    $('#igc_descriptive_template_mode').on('change', function () {
+        updateDescriptiveTemplateEditor();
+    });
+
+    $('#igc_descriptive_template_text').on('change', function () {
+        const mode = String($('#igc_descriptive_template_mode').val() || generationMode.CHARACTER);
+        const value = String($(this).val() || '').trim();
+        const settings = getSettings();
+        if (value) {
+            settings.descriptive_template_overrides[mode] = value;
+        } else {
+            delete settings.descriptive_template_overrides[mode];
+        }
+        saveSettings();
+    });
+
+    $('#igc_descriptive_template_reset').on('click', function () {
+        const mode = String($('#igc_descriptive_template_mode').val() || generationMode.CHARACTER);
+        const settings = getSettings();
+        delete settings.descriptive_template_overrides[mode];
+        updateDescriptiveTemplateEditor();
         saveSettings();
     });
 
@@ -385,6 +461,39 @@ function processReply(str) {
     return str;
 }
 
+/**
+ * Light sanitization for descriptive (natural language) prompts.
+ * Preserves sentence structure unlike processReply which collapses to tags.
+ */
+function processReplyDescriptive(str) {
+    if (!str) {
+        return '';
+    }
+
+    // Replace smart quotes with standard, strip wrapping quotes
+    str = str.replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"');
+    str = str.replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'");
+    str = str.replace(/^["']+|["']+$/g, '');
+
+    // Remove markdown bold/italic/header markers
+    str = str.replace(/^#{1,6}\s+/gm, '');
+    str = str.replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1');
+    str = str.replace(/_{1,3}([^_]+)_{1,3}/g, '$1');
+
+    // Remove common LLM preambles
+    str = str.replace(/^(?:Here(?:'s| is) (?:a |the )?(?:description|image prompt|visual description|paragraph)[:\s]*)/i, '');
+    str = str.replace(/^(?:Sure[,!]?\s*(?:here(?:'s| is)[:\s]*)?)/i, '');
+    str = str.replace(/^(?:Certainly[,!]?\s*(?:here(?:'s| is)[:\s]*)?)/i, '');
+
+    // Unicode normalization
+    str = str.normalize('NFD');
+
+    // Collapse whitespace/newlines to single spaces
+    str = str.replace(/\s+/g, ' ').trim();
+
+    return str;
+}
+
 async function callQuietPrompt(quietPrompt) {
     const context = getContext();
     // Inject as user-role message instead of system-role quiet prompt.
@@ -403,7 +512,18 @@ async function callQuietPrompt(quietPrompt) {
     }
 }
 
-function getTemplateByMode(mode) {
+function getTemplateByMode(mode, descriptive = false) {
+    if (descriptive) {
+        const settings = getSettings();
+        const override = settings.descriptive_template_overrides?.[String(mode)];
+        if (typeof override === 'string' && override.trim()) {
+            return override;
+        }
+        const descTemplate = descriptivePromptTemplates[mode];
+        if (descTemplate) {
+            return descTemplate;
+        }
+    }
     const template = promptTemplates[mode];
     if (!template) {
         throw new Error(`Unknown mode: ${mode}`);
@@ -540,7 +660,7 @@ function buildContextBlock(rawContextModeSetting, settings) {
 
 function buildRawPromptInput(mode, customPrompt = null) {
     const settings = getSettings();
-    const template = customPrompt ? processTemplate(customPrompt) : processTemplate(getTemplateByMode(mode));
+    const template = customPrompt ? processTemplate(customPrompt) : processTemplate(getTemplateByMode(mode, settings.descriptive_prompt));
     const normalizedContextMode = normalizeRawContextMode(settings.raw_context_mode);
     const contextBlock = buildContextBlock(normalizedContextMode, settings);
 
@@ -552,7 +672,10 @@ function buildRawPromptInput(mode, customPrompt = null) {
 }
 
 function processGeneratedPrompt(rawResponse, source) {
-    const processed = processReply(rawResponse);
+    const settings = getSettings();
+    const processed = settings.descriptive_prompt
+        ? processReplyDescriptive(rawResponse)
+        : processReply(rawResponse);
     if (!processed) {
         throw new Error(`Prompt generation failed (${source}): no text returned.`);
     }
@@ -560,7 +683,8 @@ function processGeneratedPrompt(rawResponse, source) {
 }
 
 async function generatePromptWithQuiet(mode, customPrompt = null) {
-    const quietPrompt = customPrompt ? processTemplate(customPrompt) : processTemplate(getTemplateByMode(mode));
+    const settings = getSettings();
+    const quietPrompt = customPrompt ? processTemplate(customPrompt) : processTemplate(getTemplateByMode(mode, settings.descriptive_prompt));
     console.debug(`[IGC] Prompt generation engine=quiet inputLength=${quietPrompt.length}`);
     const response = await callQuietPrompt(quietPrompt);
     const processed = processGeneratedPrompt(response, 'quiet');
@@ -573,6 +697,11 @@ async function generatePromptWithRaw(mode, customPrompt = null) {
     const rawPrompt = buildRawPromptInput(mode, customPrompt);
     console.debug(`[IGC] Prompt generation engine=raw contextMode=${settings.raw_context_mode} inputLength=${rawPrompt.length}`);
 
+    // Descriptive prompts need more tokens; enforce a minimum floor
+    const responseLength = settings.descriptive_prompt
+        ? Math.max(300, settings.raw_response_length)
+        : settings.raw_response_length;
+
     // Route through ST's full pipeline via setExtensionPrompt + generateQuietPrompt
     // instead of generateRaw, for aggregator API compatibility.
     const context = getContext();
@@ -582,7 +711,7 @@ async function generatePromptWithRaw(mode, customPrompt = null) {
     try {
         response = await generateQuietPrompt({
             quietPrompt: '',
-            responseLength: settings.raw_response_length,
+            responseLength: responseLength,
             removeReasoning: true,
         });
     } finally {
@@ -624,6 +753,11 @@ async function generatePromptWithLLM(mode, customPrompt = null) {
 
 function buildFinalPrompt(generatedPrompt) {
     const settings = getSettings();
+
+    if (settings.descriptive_prompt) {
+        return generatedPrompt.trim();
+    }
+
     const parts = [];
     const prefix = String(settings.prefix || '').trim();
 
