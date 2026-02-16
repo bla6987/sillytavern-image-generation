@@ -682,6 +682,30 @@ async function fetchOpenRouterModels(forceRefresh = false) {
     return [];
 }
 
+let cachedOpenRouterEditModels = null;
+
+async function fetchOpenRouterEditModels(forceRefresh = false) {
+    if (cachedOpenRouterEditModels && !forceRefresh) {
+        return cachedOpenRouterEditModels;
+    }
+
+    const result = await fetch('https://openrouter.ai/api/v1/models');
+
+    if (result.ok) {
+        const data = await result.json();
+        cachedOpenRouterEditModels = (data.data || [])
+            .filter(m =>
+                m.architecture?.input_modalities?.includes('image') &&
+                m.architecture?.output_modalities?.includes('image'),
+            )
+            .map(m => ({ value: m.id, text: m.name || m.id }))
+            .sort((a, b) => a.value.localeCompare(b.value));
+        return cachedOpenRouterEditModels;
+    }
+
+    return [];
+}
+
 function normalizeImageMimeType(mimeType) {
     const normalized = String(mimeType || '').trim().toLowerCase();
     if (!normalized) {
@@ -1084,7 +1108,7 @@ async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
         $modelSelect.empty().append('<option value="">Loading...</option>').prop('disabled', true);
         $refreshBtn.prop('disabled', true);
         try {
-            const models = await fetchOpenRouterModels(forceRefresh);
+            const models = await fetchOpenRouterEditModels(forceRefresh);
             $modelSelect.empty();
 
             if (models.length === 0) {
