@@ -1,8 +1,13 @@
 import { Popper } from '../../../../lib.js';
 import { getContext, extension_settings } from '../../../extensions.js';
-import { generateQuietPrompt } from '../../../../script.js';
-import { eventSource, event_types } from '../../../../script.js';
-import { getRequestHeaders, saveSettingsDebounced } from '../../../../script.js';
+import {
+    appendMediaToMessage,
+    eventSource,
+    event_types,
+    generateQuietPrompt,
+    getRequestHeaders,
+    saveSettingsDebounced,
+} from '../../../../script.js';
 import { saveBase64AsFile } from '../../../utils.js';
 import { secret_state, SECRET_KEYS } from '../../../secrets.js';
 import { humanizedDateTime, getMessageTimeStamp } from '../../../RossAscends-mods.js';
@@ -11,6 +16,8 @@ const extensionName = 'image_generation';
 const extensionFolderPath = new URL('.', import.meta.url).pathname.slice(1).replace(/\/$/, '');
 const modeDropdownId = 'igc_dropdown';
 const modeDropdownButtonSelector = '#image_gen_clone_button';
+const IGC_GENERATOR_ID = 'igc';
+const IGC_MESSAGE_VERSION = 1;
 let slashCommandsRegistered = false;
 let modeDropdownPopper = null;
 let modeDropdownCloseHandlerBound = false;
@@ -1696,11 +1703,154 @@ async function generateOpenRouterImage(prompt, model, aspectRatio) {
     throw new Error(text);
 }
 
-async function saveAndDisplayImage(imageData, prompt) {
+function createIGCMediaAttachment(url, prompt) {
+    return {
+        url: String(url || ''),
+        type: 'image',
+        title: String(prompt || ''),
+        source: 'generated',
+        generator: IGC_GENERATOR_ID,
+        igc: true,
+    };
+}
+
+function ensureIGCMessageMetadata(message) {
+    if (!message.extra || typeof message.extra !== 'object') {
+        message.extra = {};
+    }
+
+    const existing = (message.extra.igc && typeof message.extra.igc === 'object')
+        ? message.extra.igc
+        : {};
+    message.extra.igc = {
+        ...existing,
+        version: IGC_MESSAGE_VERSION,
+        generator: IGC_GENERATOR_ID,
+    };
+}
+
+function isLikelyLegacyIGCMedia(message, media) {
+    if (!message || !media || typeof media !== 'object') {
+        return false;
+    }
+
+    if (String(media.source || '').trim().toLowerCase() !== 'generated') {
+        return false;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(media, 'generation_type') || Object.prototype.hasOwnProperty.call(media, 'negative')) {
+        return false;
+    }
+
+    if (message.is_system !== true) {
+        return false;
+    }
+
+    const mediaTitle = String(media.title || '').trim();
+    const messageText = String(message.mes || '').trim();
+    return !!mediaTitle && mediaTitle === messageText;
+}
+
+function isIGCMedia(message, media) {
+    if (!message || !media || typeof media !== 'object') {
+        return false;
+    }
+
+    if (String(media.generator || '').trim() === IGC_GENERATOR_ID || media.igc === true) {
+        return true;
+    }
+
+    const messageMarker = message.extra?.igc;
+    if (messageMarker === true) {
+        return true;
+    }
+    if (messageMarker && typeof messageMarker === 'object' && String(messageMarker.generator || '').trim() === IGC_GENERATOR_ID) {
+        return true;
+    }
+
+    return isLikelyLegacyIGCMedia(message, media);
+}
+
+function resolveImageMessageContext($container) {
+    const context = getContext();
+    const $messageElement = $container.closest('.mes');
+    const messageId = Number($messageElement.attr('mesid'));
+    if (!Number.isFinite(messageId) || !context || !Array.isArray(context.chat)) {
+        return null;
+    }
+
+    const message = context.chat[messageId];
+    if (!message || typeof message !== 'object') {
+        return null;
+    }
+
+    const media = Array.isArray(message.extra?.media) ? message.extra.media : [];
+    if (!media.length) {
+        return {
+            context,
+            message,
+            messageId,
+            media: null,
+            mediaIndex: -1,
+            $messageElement,
+        };
+    }
+
+    let mediaIndex = Number($container.attr('data-index'));
+    if (!Number.isFinite(mediaIndex)) {
+        mediaIndex = Number(message.extra?.media_index);
+    }
+    if (!Number.isFinite(mediaIndex) || mediaIndex < 0 || mediaIndex >= media.length) {
+        mediaIndex = media.length - 1;
+    }
+
+    return {
+        context,
+        message,
+        messageId,
+        media: media[mediaIndex] || null,
+        mediaIndex,
+        $messageElement,
+    };
+}
+
+function appendIGCMediaToExistingMessage(message, $messageElement, imagePath, prompt) {
+    if (!message || typeof message !== 'object') {
+        throw new Error('Invalid message for regeneration.');
+    }
+    if (!$messageElement?.length) {
+        throw new Error('Target message element not found.');
+    }
+
+    if (!message.extra || typeof message.extra !== 'object') {
+        message.extra = {};
+    }
+    if (!Array.isArray(message.extra.media)) {
+        message.extra.media = [];
+    }
+    if (!message.extra.media.length && !message.extra.media_display) {
+        message.extra.media_display = 'gallery';
+    }
+
+    ensureIGCMessageMetadata(message);
+    message.extra.media.push(createIGCMediaAttachment(imagePath, prompt));
+    message.extra.media_index = message.extra.media.length - 1;
+    message.extra.inline_image = !(message.extra.media.length && !message.extra.inline_image);
+
+    appendMediaToMessage(message, $messageElement);
+}
+
+async function saveGeneratedImageFile(imageData) {
     const context = getContext();
     const characterName = context.name2 || 'Unknown';
     const filename = `${characterName}_${humanizedDateTime()}`;
-    const imagePath = await saveBase64AsFile(imageData.data, characterName, filename, imageData.format);
+    return await saveBase64AsFile(imageData.data, characterName, filename, imageData.format);
+}
+
+async function saveAndDisplayImage(imageData, prompt) {
+    const context = getContext();
+    const characterName = context.name2 || 'Unknown';
+    const imagePath = await saveGeneratedImageFile(imageData);
 
     const message = {
         name: characterName,
@@ -1709,17 +1859,13 @@ async function saveAndDisplayImage(imageData, prompt) {
         send_date: getMessageTimeStamp(),
         mes: prompt,
         extra: {
-            media: [{
-                url: imagePath,
-                type: 'image',
-                title: prompt,
-                source: 'generated',
-            }],
+            media: [createIGCMediaAttachment(imagePath, prompt)],
             media_display: 'gallery',
             media_index: 0,
             inline_image: false,
         },
     };
+    ensureIGCMessageMetadata(message);
 
     context.chat.push(message);
     const messageId = context.chat.length - 1;
@@ -1771,6 +1917,9 @@ async function applyGeneratedBackground(imagePath) {
 function injectImageActionButtons() {
     $('.mes_img_container .mes_img_controls').each(function () {
         const $controls = $(this);
+        const $container = $controls.closest('.mes_img_container');
+        const target = resolveImageMessageContext($container);
+        const canRegenerate = !!(target?.media && isIGCMedia(target.message, target.media));
         const $deleteBtn = $controls.find('.mes_media_delete');
 
         if ($controls.find('.igc_edit_image').length === 0) {
@@ -1790,7 +1939,67 @@ function injectImageActionButtons() {
                 $controls.append($bgButton);
             }
         }
+
+        const $existingRegenerateBtn = $controls.find('.igc_regenerate_image');
+        if (canRegenerate && $existingRegenerateBtn.length === 0) {
+            const $regenerateButton = $('<div title="Regenerate (IGC)" class="right_menu_button fa-lg fa-solid fa-arrows-rotate igc_regenerate_image"></div>');
+            if ($deleteBtn.length > 0) {
+                $deleteBtn.before($regenerateButton);
+            } else {
+                $controls.append($regenerateButton);
+            }
+        } else if (!canRegenerate && $existingRegenerateBtn.length > 0) {
+            $existingRegenerateBtn.remove();
+        }
     });
+}
+
+async function regenerateIGCImageFromContainer($container) {
+    const target = resolveImageMessageContext($container);
+    if (!target || !target.media) {
+        throw new Error('Unable to locate the selected image for regeneration.');
+    }
+
+    if (!isIGCMedia(target.message, target.media)) {
+        throw new Error('Selected image is not managed by IGC.');
+    }
+
+    const sourcePrompt = String(target.media.title || target.message?.mes || '').trim();
+    if (!sourcePrompt) {
+        throw new Error('No prompt found for the selected image.');
+    }
+
+    showGenerationIndicator('Preparing regeneration...');
+    const reviewResult = await showReviewPopup(sourcePrompt);
+    const applyAsBackground = !!reviewResult.asBackground;
+
+    showGenerationIndicator('Generating image…');
+    let imagePath = '';
+    if (reviewResult.backend === backendType.OPENROUTER) {
+        const aspectRatio = getSDSettingsAspectRatio();
+        const imageData = await generateOpenRouterImage(reviewResult.prompt, reviewResult.model, aspectRatio);
+        updateGenerationIndicator('Saving image…');
+        imagePath = await saveGeneratedImageFile(imageData);
+    } else {
+        imagePath = await executeSTImageGeneration(reviewResult.prompt);
+    }
+
+    updateGenerationIndicator('Updating message…');
+    appendIGCMediaToExistingMessage(target.message, target.$messageElement, imagePath, reviewResult.prompt);
+    await target.context.saveChat();
+    injectImageActionButtons();
+
+    if (applyAsBackground) {
+        try {
+            await applyGeneratedBackground(imagePath);
+            toastr.success('Image regenerated and set as background!');
+        } catch (error) {
+            console.warn('[IGC] Failed to auto-apply regenerated background:', error);
+            toastr.warning('Image regenerated, but setting background failed.');
+        }
+    } else {
+        toastr.success('Image regenerated successfully!');
+    }
 }
 
 async function generateImage(overrideMode = null, customPrompt = null) {
@@ -2394,6 +2603,26 @@ jQuery(async function () {
         } catch (error) {
             console.error('[IGC] Failed to set background:', error);
             toastr.error('Failed to set background.');
+        }
+    });
+
+    $(document).on('click', '.igc_regenerate_image', async function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        try {
+            const $container = $(this).closest('.mes_img_container');
+            await regenerateIGCImageFromContainer($container);
+        } catch (error) {
+            const message = String(error?.message || 'Unknown error');
+            if (/aborted by user|canceled|cancelled/i.test(message)) {
+                toastr.warning('Image regeneration canceled.');
+            } else {
+                console.error('[IGC] Failed to regenerate image:', error);
+                toastr.error(`Image regeneration failed: ${message}`);
+            }
+        } finally {
+            hideGenerationIndicator();
         }
     });
 });
