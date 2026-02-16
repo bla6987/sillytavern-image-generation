@@ -88,8 +88,13 @@
             </div>
 
             <div class="igc-settings-row">
-                <label for="igc_raw_response_length">Raw Response Length:</label>
-                <input id="igc_raw_response_length" type="number" min="64" max="512" step="16">
+                <label for="igc_raw_response_length">Response Token Limit:</label>
+                <input id="igc_raw_response_length" type="number" min="64" max="1024" step="16">
+            </div>
+
+            <div class="igc-settings-row igc-checkbox-row">
+                <input type="checkbox" id="igc_exclude_authors_note">
+                <label for="igc_exclude_authors_note">Exclude author's note from prompt generation</label>
             </div>
 
             <!-- OpenRouter (Image Editing) -->

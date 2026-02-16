@@ -114,13 +114,14 @@ const defaultSettings = {
     raw_context_mode: rawContextMode.RECENT_CONTEXT,
     raw_context_messages: 4,
     raw_context_chars_per_message: 400,
-    raw_response_length: 220,
+    raw_response_length: 300,
     backend: backendType.DEFAULT,
     openrouter_model: '',
     openrouter_api_key: '',
     descriptive_prompt: false,
     descriptive_custom_prompt: false,
     descriptive_template_overrides: {},
+    exclude_authors_note: true,
 };
 
 // Exact ST default templates for visible modes.
@@ -267,7 +268,7 @@ function loadSettings() {
         changed = true;
     }
 
-    const normalizedRawResponseLength = clampNumber(settings.raw_response_length, defaultSettings.raw_response_length, 64, 512);
+    const normalizedRawResponseLength = clampNumber(settings.raw_response_length, defaultSettings.raw_response_length, 64, 1024);
     if (settings.raw_response_length !== normalizedRawResponseLength) {
         settings.raw_response_length = normalizedRawResponseLength;
         changed = true;
@@ -296,6 +297,11 @@ function loadSettings() {
 
     if (typeof settings.descriptive_custom_prompt !== 'boolean') {
         settings.descriptive_custom_prompt = defaultSettings.descriptive_custom_prompt;
+        changed = true;
+    }
+
+    if (typeof settings.exclude_authors_note !== 'boolean') {
+        settings.exclude_authors_note = defaultSettings.exclude_authors_note;
         changed = true;
     }
 
@@ -345,6 +351,7 @@ function updateUIFromSettings() {
     $('#igc_raw_context_messages').val(settings.raw_context_messages);
     $('#igc_raw_context_chars_per_message').val(settings.raw_context_chars_per_message);
     $('#igc_raw_response_length').val(settings.raw_response_length);
+    $('#igc_exclude_authors_note').prop('checked', settings.exclude_authors_note);
     $('#igc_openrouter_api_key').val(settings.openrouter_api_key);
     $('#igc_descriptive_prompt').prop('checked', settings.descriptive_prompt);
     $('#igc_descriptive_custom_prompt').prop('checked', settings.descriptive_custom_prompt);
@@ -388,8 +395,13 @@ function bindUIEvents() {
     });
 
     $('#igc_raw_response_length').on('change', function () {
-        getSettings().raw_response_length = clampNumber($(this).val(), defaultSettings.raw_response_length, 64, 512);
+        getSettings().raw_response_length = clampNumber($(this).val(), defaultSettings.raw_response_length, 64, 1024);
         $(this).val(getSettings().raw_response_length);
+        saveSettings();
+    });
+
+    $('#igc_exclude_authors_note').on('change', function () {
+        getSettings().exclude_authors_note = $(this).prop('checked');
         saveSettings();
     });
 
@@ -514,7 +526,33 @@ function processReplyDescriptive(str) {
     return str;
 }
 
+const AUTHORS_NOTE_KEY = '2_floating_prompt';
+
+async function withExcludedAuthorsNote(generationFn) {
+    const settings = getSettings();
+    if (!settings.exclude_authors_note) {
+        return generationFn();
+    }
+    const context = getContext();
+    const saved = context.extensionPrompts[AUTHORS_NOTE_KEY];
+    if (saved) {
+        context.setExtensionPrompt(AUTHORS_NOTE_KEY, '', saved.position, saved.depth, saved.scan, saved.role, saved.filter);
+    }
+    try {
+        return await generationFn();
+    } finally {
+        if (saved) {
+            context.setExtensionPrompt(AUTHORS_NOTE_KEY, saved.value, saved.position, saved.depth, saved.scan, saved.role, saved.filter);
+        }
+    }
+}
+
 async function callQuietPrompt(quietPrompt) {
+    const settings = getSettings();
+    const responseLength = settings.descriptive_prompt
+        ? Math.max(400, settings.raw_response_length)
+        : settings.raw_response_length;
+
     const context = getContext();
     // Inject as user-role message instead of system-role quiet prompt.
     // The quiet prompt mechanism creates a trailing system message which
@@ -523,7 +561,13 @@ async function callQuietPrompt(quietPrompt) {
     const INJECT_KEY = 'igc_quiet_inject';
     context.setExtensionPrompt(INJECT_KEY, quietPrompt, 1 /* IN_CHAT */, 0, false, 1 /* USER */);
     try {
-        return await generateQuietPrompt({ quietPrompt: '' });
+        return await withExcludedAuthorsNote(() =>
+            generateQuietPrompt({
+                quietPrompt: '',
+                responseLength: responseLength,
+                removeReasoning: true,
+            }),
+        );
     } catch {
         // Compatibility fallback for older API signatures.
         return await generateQuietPrompt('', false, false);
@@ -727,7 +771,7 @@ async function generatePromptWithRaw(mode, customPrompt = null) {
 
     // Descriptive prompts need more tokens; enforce a minimum floor
     const responseLength = settings.descriptive_prompt
-        ? Math.max(300, settings.raw_response_length)
+        ? Math.max(400, settings.raw_response_length)
         : settings.raw_response_length;
 
     // Route through ST's full pipeline via setExtensionPrompt + generateQuietPrompt
@@ -737,11 +781,13 @@ async function generatePromptWithRaw(mode, customPrompt = null) {
     context.setExtensionPrompt(INJECT_KEY, rawPrompt, 1 /* IN_CHAT */, 0, false, 1 /* USER */);
     let response;
     try {
-        response = await generateQuietPrompt({
-            quietPrompt: '',
-            responseLength: responseLength,
-            removeReasoning: true,
-        });
+        response = await withExcludedAuthorsNote(() =>
+            generateQuietPrompt({
+                quietPrompt: '',
+                responseLength: responseLength,
+                removeReasoning: true,
+            }),
+        );
     } finally {
         context.setExtensionPrompt(INJECT_KEY, '', 1, 0, false, 1);
     }
