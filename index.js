@@ -682,6 +682,7 @@ async function fetchOpenRouterModels(forceRefresh = false) {
         return cachedOpenRouterModels;
     }
 
+    console.warn('[IGC] Failed to fetch OpenRouter models:', result.status, result.statusText);
     return [];
 }
 
@@ -1291,45 +1292,52 @@ async function editOpenRouterImage(prompt, model, image, referenceImage, aspectR
         contentParts.push({ type: 'image_url', image_url: { url: referenceImage } });
     }
 
-    const result = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://sillytavern.app',
-            'X-Title': 'SillyTavern',
-        },
-        body: JSON.stringify({
-            model: model,
-            modalities: ['image', 'text'],
-            image_config: {
-                aspect_ratio: aspectRatio || '1:1',
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
+    try {
+        const result = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+                'HTTP-Referer': 'https://sillytavern.app',
+                'X-Title': 'SillyTavern',
             },
-            messages: [{
-                role: 'user',
-                content: contentParts,
-            }],
-        }),
-    });
+            signal: controller.signal,
+            body: JSON.stringify({
+                model: model,
+                modalities: ['image', 'text'],
+                image_config: {
+                    aspect_ratio: aspectRatio || '1:1',
+                },
+                messages: [{
+                    role: 'user',
+                    content: contentParts,
+                }],
+            }),
+        });
 
-    if (!result.ok) {
-        let errorMessage;
-        try {
-            const errorData = await result.json();
-            errorMessage = errorData?.error?.message || JSON.stringify(errorData);
-        } catch {
-            errorMessage = await result.text();
+        if (!result.ok) {
+            let errorMessage;
+            try {
+                const errorData = await result.json();
+                errorMessage = errorData?.error?.message || JSON.stringify(errorData);
+            } catch {
+                errorMessage = await result.text();
+            }
+            throw new Error(`OpenRouter API error (${result.status}): ${errorMessage}`);
         }
-        throw new Error(`OpenRouter API error (${result.status}): ${errorMessage}`);
-    }
 
-    const data = await result.json();
-    const imageUrl = data?.choices?.[0]?.message?.images?.[0]?.image_url?.url;
-    if (!imageUrl) {
-        throw new Error('No image returned in OpenRouter response.');
-    }
+        const data = await result.json();
+        const imageUrl = data?.choices?.[0]?.message?.images?.[0]?.image_url?.url;
+        if (!imageUrl) {
+            throw new Error('No image returned in OpenRouter response.');
+        }
 
-    return resolveImagePayload(imageUrl);
+        return resolveImagePayload(imageUrl);
+    } finally {
+        clearTimeout(timeoutId);
+    }
 }
 
 async function editImage(options = {}) {
@@ -1525,7 +1533,8 @@ async function generateOpenRouterImage(prompt, model, aspectRatio) {
         if (!data.image) {
             throw new Error('No image returned in OpenRouter response.');
         }
-        return resolveImagePayload(data.image);
+        const format = (data.format === 'jpeg') ? 'jpg' : (data.format || 'png');
+        return { format, data: data.image };
     }
 
     const text = await result.text();
