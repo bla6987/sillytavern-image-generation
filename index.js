@@ -8,7 +8,7 @@ import { secret_state, SECRET_KEYS } from '../../../secrets.js';
 import { humanizedDateTime, getMessageTimeStamp } from '../../../RossAscends-mods.js';
 
 const extensionName = 'image_generation';
-const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
+const extensionFolderPath = new URL('.', import.meta.url).pathname.slice(1).replace(/\/$/, '');
 const modeDropdownId = 'igc_dropdown';
 const modeDropdownButtonSelector = '#image_gen_clone_button';
 let slashCommandsRegistered = false;
@@ -484,6 +484,7 @@ function processReplyDescriptive(str) {
     str = str.replace(/^(?:Here(?:'s| is) (?:a |the )?(?:description|image prompt|visual description|paragraph)[:\s]*)/i, '');
     str = str.replace(/^(?:Sure[,!]?\s*(?:here(?:'s| is)[:\s]*)?)/i, '');
     str = str.replace(/^(?:Certainly[,!]?\s*(?:here(?:'s| is)[:\s]*)?)/i, '');
+    str = str.replace(/^(?:a |the )?(?:description|image prompt|visual description|paragraph)[:\s]*/i, '');
 
     // Unicode normalization
     str = str.normalize('NFD');
