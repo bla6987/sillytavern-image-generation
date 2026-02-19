@@ -2191,7 +2191,7 @@ function bindModeDropdownCloseHandler() {
     }
 
     modeDropdownCloseHandlerBound = true;
-    $(document).on('click touchend', function (e) {
+    $(document).off('click.igc touchend.igc').on('click.igc touchend.igc', function (e) {
         const $dropdown = $(`#${modeDropdownId}`);
         if (!$dropdown.length || !$dropdown.is(':visible')) {
             return;
@@ -2205,15 +2205,22 @@ function bindModeDropdownCloseHandler() {
         hideModeDropdown();
     });
 
-    $(window).on('resize', function () {
-        const $dropdown = $(`#${modeDropdownId}`);
-        if (!$dropdown.length || !$dropdown.is(':visible')) {
+    let _resizeRafPending = false;
+    $(window).on('resize.igc', function () {
+        if (_resizeRafPending) {
             return;
         }
-
-        if (modeDropdownPopper && typeof modeDropdownPopper.update === 'function') {
-            modeDropdownPopper.update();
-        }
+        _resizeRafPending = true;
+        requestAnimationFrame(function () {
+            _resizeRafPending = false;
+            const $dropdown = $(`#${modeDropdownId}`);
+            if (!$dropdown.length || !$dropdown.is(':visible')) {
+                return;
+            }
+            if (modeDropdownPopper && typeof modeDropdownPopper.update === 'function') {
+                modeDropdownPopper.update();
+            }
+        });
     });
 }
 
@@ -2587,26 +2594,32 @@ jQuery(async function () {
     tryCreateButton();
     setTimeout(injectImageActionButtons, 1000);
 
+    let _debouncedInjectTimer = null;
+    function debouncedInjectButtons() {
+        clearTimeout(_debouncedInjectTimer);
+        _debouncedInjectTimer = setTimeout(function () {
+            createChatButton();
+            injectImageActionButtons();
+        }, 500);
+    }
+
     eventSource.on(event_types.CHAT_CHANGED, function () {
         hideModeDropdown();
-        setTimeout(createChatButton, 500);
-        setTimeout(injectImageActionButtons, 500);
+        debouncedInjectButtons();
     });
 
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, function () {
-        setTimeout(createChatButton, 100);
-        setTimeout(injectImageActionButtons, 100);
+        debouncedInjectButtons();
     });
 
     eventSource.on(event_types.USER_MESSAGE_RENDERED, function () {
-        setTimeout(injectImageActionButtons, 100);
+        debouncedInjectButtons();
     });
 
     eventSource.on(event_types.APP_READY, function () {
         hideModeDropdown();
         registerSlashCommands();
-        setTimeout(createChatButton, 500);
-        setTimeout(injectImageActionButtons, 500);
+        debouncedInjectButtons();
     });
 
     $(document).on('click', '.igc_edit_image', async function (e) {
