@@ -21,6 +21,7 @@ const IGC_MESSAGE_VERSION = 1;
 let slashCommandsRegistered = false;
 let modeDropdownPopper = null;
 let modeDropdownCloseHandlerBound = false;
+let modeDropdownResizeUnsubscribe = null;
 let generationToast = null;
 let activeToastCount = 0;
 
@@ -2206,7 +2207,7 @@ function bindModeDropdownCloseHandler() {
     });
 
     let _resizeRafPending = false;
-    $(window).on('resize.igc', function () {
+    const onViewportResize = function () {
         if (_resizeRafPending) {
             return;
         }
@@ -2221,7 +2222,19 @@ function bindModeDropdownCloseHandler() {
                 modeDropdownPopper.update();
             }
         });
-    });
+    };
+
+    const runtimeBus = window.STRuntimeBus;
+    if (runtimeBus?.viewport?.subscribe) {
+        if (modeDropdownResizeUnsubscribe) {
+            modeDropdownResizeUnsubscribe();
+            modeDropdownResizeUnsubscribe = null;
+        }
+        $(window).off('resize.igc');
+        modeDropdownResizeUnsubscribe = runtimeBus.viewport.subscribe('layout', onViewportResize);
+    } else {
+        $(window).off('resize.igc').on('resize.igc', onViewportResize);
+    }
 }
 
 function showModeDropdown($button) {
