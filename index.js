@@ -1926,21 +1926,15 @@ async function saveAndDisplayImage(imageData, prompt) {
 
 async function executeSTImageGeneration(prompt) {
     try {
-        const { executeSlashCommandsWithOptions } = await import('../../../slash-commands.js');
-        const escapedPrompt = prompt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        const result = await executeSlashCommandsWithOptions(`/sd raw=true "${escapedPrompt}"`, {
-            handleParserErrors: false,
-            handleExecutionErrors: false,
-        });
-
-        if (!result || result.isError || result.isAborted) {
-            const reason = result?.errorMessage || result?.abortReason || 'No image URL returned from /sd command.';
-            throw new Error(reason);
+        // Call /sd's handler directly: the prompt is model output, and the
+        // STscript parser would expand any {{macros}} in it.
+        const sdCommand = SillyTavern.getContext().SlashCommandParser?.commands?.sd;
+        if (typeof sdCommand?.callback !== 'function') {
+            throw new Error('The /sd command is not available. Is the Image Generation extension enabled?');
         }
+        const result = await sdCommand.callback({}, prompt);
 
-        const imagePath = typeof result.pipe === 'string'
-            ? result.pipe.trim()
-            : String(result.pipe ?? '').trim();
+        const imagePath = String(result ?? '').trim();
         if (!imagePath) {
             throw new Error('No image URL returned from /sd command.');
         }
