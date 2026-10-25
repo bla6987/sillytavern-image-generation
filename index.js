@@ -1,3 +1,4 @@
+import { INPUT_IMAGE_BYTES, OUTPUT_IMAGE_BYTES, boundedBlob, boundedJson, fetchImageBlob, imageDimensions, validateDimensions, dataUrlBlob, prepareImageBlob } from './image-memory.js';
 import { Popper } from '../../../../lib.js';
 import { getContext, extension_settings } from '../../../extensions.js';
 import {
@@ -24,6 +25,7 @@ let modeDropdownCloseHandlerBound = false;
 let modeDropdownResizeUnsubscribe = null;
 let generationToast = null;
 let activeToastCount = 0;
+let imageOperationActive = false;
 
 // Match ST default visible generation modes.
 const generationMode = {
@@ -67,7 +69,7 @@ const validRawContextModes = new Set(Object.values(rawContextMode));
 const backendType = { DEFAULT: 'default', OPENROUTER: 'openrouter' };
 const validBackends = new Set(Object.values(backendType));
 const editSourceType = { NONE: 'none', CHAT: 'chat', UPLOAD: 'upload' };
-const EDIT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const EDIT_MAX_IMAGE_BYTES = INPUT_IMAGE_BYTES;
 const EDIT_ALLOWED_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
 const openRouterAspectRatios = {
@@ -1007,7 +1009,7 @@ function blobToDataUrl(blob) {
     });
 }
 
-async function fileToDataUrl(file, label) {
+async function fileToEditImage(file, label, maxDimension = 0) {
     if (!(file instanceof File)) {
         throw new Error(`${label}: no file selected.`);
     }
@@ -1019,9 +1021,10 @@ async function fileToDataUrl(file, label) {
         label: label,
     });
 
-    const dataUrl = await blobToDataUrl(file);
+    const prepared = await prepareImageBlob(file, maxDimension);
+    const dataUrl = await blobToDataUrl(prepared.blob);
     validateDataUrlImage(dataUrl, label);
-    return dataUrl;
+    return { dataUrl, width: prepared.width, height: prepared.height };
 }
 
 function getPathDisplayName(path) {
@@ -1123,81 +1126,39 @@ function getLatestChatImageUrl() {
     return collectChatImageCandidates()[0]?.value || '';
 }
 
-async function fetchImageAsDataUrl(imageUrl, label) {
+async function fetchEditImage(imageUrl, label, maxDimension = 0) {
     const normalized = String(imageUrl || '').trim();
-    if (!normalized) {
-        throw new Error(`${label}: no source image selected.`);
-    }
-
-    if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(normalized)) {
-        validateDataUrlImage(normalized, label);
-        return normalized;
-    }
-
-    const response = await fetch(encodeURI(normalized), { method: 'GET' });
-    if (!response.ok) {
-        throw new Error(`${label}: failed to fetch image (${response.status} ${response.statusText}).`);
-    }
-
-    const blob = await response.blob();
-    const inferredType = normalizeImageMimeType(blob.type) || inferMimeTypeFromName(normalized);
-    ensureValidImageMeta({
-        mimeType: inferredType,
-        sizeBytes: Number(blob.size || 0),
-        label: label,
-    });
-
-    const typedBlob = blob.type ? blob : new Blob([blob], { type: inferredType });
-    const dataUrl = await blobToDataUrl(typedBlob);
+    if (!normalized) throw new Error(`${label}: no source image selected.`);
+    const blob = /^data:/i.test(normalized)
+        ? dataUrlBlob(normalized, EDIT_MAX_IMAGE_BYTES)
+        : await fetchImageBlob(encodeURI(normalized), EDIT_MAX_IMAGE_BYTES, label);
+    const mimeType = normalizeImageMimeType(blob.type) || inferMimeTypeFromName(normalized);
+    ensureValidImageMeta({ mimeType, sizeBytes: blob.size, label });
+    const prepared = await prepareImageBlob(blob.type ? blob : new Blob([blob], { type: mimeType }), maxDimension);
+    const dataUrl = await blobToDataUrl(prepared.blob);
     validateDataUrlImage(dataUrl, label);
-    return dataUrl;
+    return { dataUrl, width: prepared.width, height: prepared.height };
 }
 
-function getDataUrlImageDimensions(dataUrl) {
-    return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve({
-            width: Number(img.naturalWidth || img.width || 0),
-            height: Number(img.naturalHeight || img.height || 0),
-        });
-        img.onerror = () => reject(new Error('Could not read source image dimensions.'));
-        img.src = dataUrl;
-    });
-}
-
-async function getAspectRatioFromDataUrl(dataUrl) {
-    try {
-        const size = await getDataUrlImageDimensions(dataUrl);
-        if (size.width > 0 && size.height > 0) {
-            return getClosestAspectRatio(size.width, size.height);
-        }
-    } catch (error) {
-        console.warn('[IGC] Failed to infer aspect ratio from source image:', error);
-    }
-
-    return getSDSettingsAspectRatio();
-}
-
-async function resolveSelectedImageDataUrl({
+async function resolveSelectedEditImage({
     sourceType,
     chatImageUrl,
     uploadFile,
     label,
     allowNone = false,
+    maxDimension = 0,
 }) {
     if (sourceType === editSourceType.NONE) {
-        if (allowNone) {
-            return '';
-        }
+        if (allowNone) return { dataUrl: '', width: 0, height: 0 };
         throw new Error(`${label}: image source is required.`);
     }
 
     if (sourceType === editSourceType.CHAT) {
-        return fetchImageAsDataUrl(chatImageUrl, label);
+        return fetchEditImage(chatImageUrl, label, maxDimension);
     }
 
     if (sourceType === editSourceType.UPLOAD) {
-        return fileToDataUrl(uploadFile, label);
+        return fileToEditImage(uploadFile, label, maxDimension);
     }
 
     throw new Error(`${label}: unsupported source type "${sourceType}".`);
@@ -1235,6 +1196,9 @@ async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
     selectedReferenceChatImage = alternativeChatCandidate?.value || chatImages[0]?.value || '';
 
     const $content = $('<div class="igc-review-controls igc-edit-controls"></div>');
+    const $resizeInput = $('<input type="checkbox" />');
+    $content.append($('<label class="checkbox_label"></label>').append($resizeInput,
+        ' Resize large input images to 2048 px to reduce memory and upload size'));
 
     const $modelRow = $('<div class="igc-review-row"></div>');
     const $modelSelect = $('<select class="igc-review-select igc-model-select"></select>');
@@ -1420,22 +1384,24 @@ async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
         throw new Error('No OpenRouter model selected.');
     }
 
-    const baseImage = await resolveSelectedImageDataUrl({
+    const baseImage = await resolveSelectedEditImage({
         sourceType: selectedBaseSource,
         chatImageUrl: selectedBaseChatImage,
         uploadFile: selectedBaseUploadFile,
         label: 'Base image',
+        maxDimension: $resizeInput.prop('checked') ? 2048 : 0,
     });
 
-    const referenceImage = await resolveSelectedImageDataUrl({
+    const referenceImage = await resolveSelectedEditImage({
         sourceType: selectedReferenceSource,
         chatImageUrl: selectedReferenceChatImage,
         uploadFile: selectedReferenceUploadFile,
         label: 'Reference image',
+        maxDimension: $resizeInput.prop('checked') ? 2048 : 0,
         allowNone: true,
     });
 
-    const aspectRatio = await getAspectRatioFromDataUrl(baseImage);
+    const aspectRatio = getClosestAspectRatio(baseImage.width, baseImage.height);
 
     settings.openrouter_model = selectedModel;
     settings.backend = backendType.DEFAULT;
@@ -1444,42 +1410,30 @@ async function showImageEditPopup(initialPrompt = '', preferredImageUrl = '') {
     return {
         prompt: editPrompt,
         model: selectedModel,
-        image: baseImage,
-        referenceImage: referenceImage,
+        image: baseImage.dataUrl,
+        referenceImage: referenceImage.dataUrl,
         aspectRatio: aspectRatio,
         asBackground: $bgCheckbox.prop('checked'),
     };
 }
 
-async function resolveImagePayload(imageUrl) {
+async function resolveImagePayload(imageUrl, rawFormat = 'png') {
     const url = String(imageUrl || '').trim();
-    if (!url) {
-        throw new Error('Empty image URL in response.');
-    }
-
-    if (/^data:image\/([a-z0-9.+-]+);base64,/i.test(url)) {
-        const match = /^data:image\/([a-z0-9.+-]+);base64,(.+)$/i.exec(url);
-        if (!match) {
-            throw new Error('Malformed data URL in response.');
-        }
-        let format = match[1].toLowerCase();
-        if (format === 'jpeg') {
-            format = 'jpg';
-        }
-        return { format, data: match[2] };
-    }
-
+    if (!url) throw new Error('Empty image URL in response.');
+    let dataUrl = url;
+    let blob;
     if (/^https?:\/\//i.test(url)) {
-        const response = await fetch(url);
-        if (!response.ok) {
-            throw new Error(`Failed to fetch image from URL: ${response.status} ${response.statusText}`);
-        }
-        const blob = await response.blob();
-        const dataUrl = await blobToDataUrl(blob);
-        return resolveImagePayload(dataUrl);
+        blob = await fetchImageBlob(url, OUTPUT_IMAGE_BYTES, 'Generated image');
+        validateDimensions(await imageDimensions(blob));
+        dataUrl = await blobToDataUrl(blob);
+    } else {
+        if (!/^data:/i.test(dataUrl)) dataUrl = `data:image/${rawFormat === 'jpg' ? 'jpeg' : rawFormat};base64,${url}`;
+        blob = dataUrlBlob(dataUrl, OUTPUT_IMAGE_BYTES);
+        validateDimensions(await imageDimensions(blob));
     }
-
-    return { format: 'png', data: url };
+    const comma = dataUrl.indexOf(',');
+    const type = dataUrl.slice(5, dataUrl.indexOf(';')).split('/')[1].toLowerCase();
+    return { format: type === 'jpeg' ? 'jpg' : type, data: dataUrl.slice(comma + 1) };
 }
 
 async function editOpenRouterImage(prompt, model, image, referenceImage, aspectRatio) {
@@ -1501,6 +1455,11 @@ async function editOpenRouterImage(prompt, model, image, referenceImage, aspectR
         contentParts.push({ type: 'image_url', image_url: { url: referenceImage } });
     }
 
+    let requestBody = JSON.stringify({ model, modalities: ['image', 'text'],
+        image_config: { aspect_ratio: aspectRatio || '1:1' },
+        messages: [{ role: 'user', content: contentParts }] });
+    contentParts.length = 0;
+    image = ''; referenceImage = '';
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 120000);
     try {
@@ -1513,43 +1472,43 @@ async function editOpenRouterImage(prompt, model, image, referenceImage, aspectR
                 'X-Title': 'SillyTavern',
             },
             signal: controller.signal,
-            body: JSON.stringify({
-                model: model,
-                modalities: ['image', 'text'],
-                image_config: {
-                    aspect_ratio: aspectRatio || '1:1',
-                },
-                messages: [{
-                    role: 'user',
-                    content: contentParts,
-                }],
-            }),
+            body: requestBody,
         });
 
+        requestBody = '';
         if (!result.ok) {
             let errorMessage;
             try {
-                const errorData = await result.json();
+                const errorData = await boundedJson(result, 65536, controller.signal);
                 errorMessage = errorData?.error?.message || JSON.stringify(errorData);
             } catch {
-                errorMessage = await result.text();
+                errorMessage = `Request failed (${result.status}).`;
             }
             throw new Error(`OpenRouter API error (${result.status}): ${errorMessage}`);
         }
 
-        const data = await result.json();
+        let data = await boundedJson(result, undefined, controller.signal);
         const imageUrl = data?.choices?.[0]?.message?.images?.[0]?.image_url?.url;
         if (!imageUrl) {
             throw new Error('No image returned in OpenRouter response.');
         }
 
+        data = null;
         return resolveImagePayload(imageUrl);
     } finally {
+        requestBody = '';
         clearTimeout(timeoutId);
     }
 }
 
 async function editImage(options = {}) {
+    if (imageOperationActive) { toastr.info('Wait for the current image operation to finish.'); return; }
+    imageOperationActive = true;
+    try { return await editImageWork(options); }
+    finally { imageOperationActive = false; }
+}
+
+async function editImageWork(options = {}) {
     const opts = typeof options === 'object' && options !== null ? options : {};
     const preferredImageUrl = String(opts.preferredImageUrl || '').trim();
     const initialPrompt = String(opts.initialPrompt || '').trim();
@@ -1563,13 +1522,15 @@ async function editImage(options = {}) {
         const editRequest = await showImageEditPopup(initialPrompt, preferredImageUrl);
 
         showGenerationIndicator('Editing image...');
-        const imageData = await editOpenRouterImage(
+        const responsePromise = editOpenRouterImage(
             editRequest.prompt,
             editRequest.model,
             editRequest.image,
             editRequest.referenceImage,
             editRequest.aspectRatio,
         );
+        editRequest.image = ''; editRequest.referenceImage = '';
+        const imageData = await responsePromise;
 
         updateGenerationIndicator('Saving image...');
         const savedImagePath = await saveAndDisplayImage(imageData, editRequest.prompt);
@@ -1738,15 +1699,15 @@ async function generateOpenRouterImage(prompt, model, aspectRatio) {
     });
 
     if (result.ok) {
-        const data = await result.json();
+        const data = await boundedJson(result);
         if (!data.image) {
             throw new Error('No image returned in OpenRouter response.');
         }
         const format = (data.format === 'jpeg') ? 'jpg' : (data.format || 'png');
-        return { format, data: data.image };
+        return resolveImagePayload(data.image, format);
     }
 
-    const text = await result.text();
+    const text = await (await boundedBlob(result, 65536, 'Error response')).text();
     throw new Error(text);
 }
 
@@ -1996,6 +1957,13 @@ function injectImageActionButtons() {
 }
 
 async function regenerateIGCImageFromContainer($container) {
+    if (imageOperationActive) { toastr.info('Wait for the current image operation to finish.'); return; }
+    imageOperationActive = true;
+    try { return await regenerateIGCImageFromContainerWork($container); }
+    finally { imageOperationActive = false; }
+}
+
+async function regenerateIGCImageFromContainerWork($container) {
     const target = resolveImageMessageContext($container);
     if (!target || !target.media) {
         throw new Error('Unable to locate the selected image for regeneration.');
@@ -2044,6 +2012,13 @@ async function regenerateIGCImageFromContainer($container) {
 }
 
 async function generateImage(overrideMode = null, customPrompt = null) {
+    if (imageOperationActive) { toastr.info('Wait for the current image operation to finish.'); return; }
+    imageOperationActive = true;
+    try { return await generateImageWork(overrideMode, customPrompt); }
+    finally { imageOperationActive = false; }
+}
+
+async function generateImageWork(overrideMode = null, customPrompt = null) {
     const settings = getSettings();
     const requestedMode = overrideMode !== null ? overrideMode : settings.mode;
     const mode = normalizeMode(Number(requestedMode));
@@ -2675,6 +2650,7 @@ jQuery(async function () {
     $(document).on('click', '.igc_regenerate_image', async function (e) {
         e.preventDefault();
         e.stopPropagation();
+        if (imageOperationActive) { toastr.info('Wait for the current image operation to finish.'); return; }
 
         try {
             const $container = $(this).closest('.mes_img_container');
@@ -2692,3 +2668,4 @@ jQuery(async function () {
         }
     });
 });
+
